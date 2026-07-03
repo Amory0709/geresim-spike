@@ -298,8 +298,27 @@
     const bboxDiagForCam = bbox.getSize(new THREE.Vector3()).length();
     const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, bboxDiagForCam * 0.001, bboxDiagForCam * 5);
     const center = bbox.getCenter(new THREE.Vector3());
-    const radius = bbox.getSize(new THREE.Vector3()).length() * 0.5;
-    camera.position.set(center.x + radius * 1.2, center.y + radius * 0.6, center.z + radius * 1.2);
+    const bboxSize = bbox.getSize(new THREE.Vector3());
+    const radius = bboxSize.length() * 0.5;
+
+    // Choose camera offset direction based on the bbox shape. For roughly
+    // cubic bboxes (e.g. hexa.vtk), use the standard diagonal offset. For
+    // slab-like bboxes (e.g. SPE-9 reservoir: 7200x7500x777), use the SHORTEST
+    // axis as the view direction so the camera looks face-on at the slab.
+    let camOffset;
+    if (Math.min(bboxSize.x, bboxSize.y, bboxSize.z) < Math.max(bboxSize.x, bboxSize.y, bboxSize.z) * 0.3) {
+      // Slab-like: view along the short axis
+      const shortAxis = bboxSize.x < bboxSize.y && bboxSize.x < bboxSize.z ? 'x'
+                      : bboxSize.y < bboxSize.z ? 'y' : 'z';
+      camOffset = new THREE.Vector3(
+        shortAxis === 'x' ? radius * 1.5 : radius * 0.6,
+        shortAxis === 'y' ? radius * 1.5 : radius * 0.6,
+        shortAxis === 'z' ? radius * 1.5 : radius * 0.6,
+      );
+    } else {
+      camOffset = new THREE.Vector3(radius * 1.2, radius * 0.6, radius * 1.2);
+    }
+    camera.position.set(center.x + camOffset.x, center.y + camOffset.y, center.z + camOffset.z);
 
     const scene = new THREE.Scene();
     // Simple mouse-orbit (no OrbitControls dep — small inline)
