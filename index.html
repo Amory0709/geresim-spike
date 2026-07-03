@@ -387,8 +387,14 @@
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
 
-        const float STEP_SIZE = 0.004;   // of model-space units; tune
-        const float EPS = 0.001;
+        // Step size adapts to the mesh's bbox so we always cover the full
+        // volume regardless of model units. Without this, meshes that
+        // are not unit-cube scaled (e.g. SPE-9 in feet) would have STEP_SIZE
+        // that's 1000x too small and the ray wouldn't actually traverse
+        // any cells.
+        float bboxDiag = length(uBboxMax - uBboxMin);
+        float stepSize = max(bboxDiag / 200.0, 1e-5);
+        const float EPS = bboxDiag * 1e-5;
         const uint OUTSIDE = 0xFFFFFFFFu;
 
         // 1D colormap (rainbow-ish, 6 stops)
@@ -452,7 +458,7 @@
           vec3 rd = rayDir;
 
           // Ray-mesh AABB
-          vec2 tHit = rayAABB(ro, rd, uBboxMin - vec3(EPS), uBboxMax + vec3(EPS));
+          vec2 tHit = rayAABB(ro, rd, uBboxMin - vec3(bboxDiag * 1e-4), uBboxMax + vec3(bboxDiag * 1e-4));
           if (tHit.y < max(tHit.x, 0.0)) { outColor = vec4(0.04, 0.06, 0.09, 1.0); return; }
           float t = max(tHit.x, 0.0);
           float tEnd = tHit.y;
@@ -479,7 +485,7 @@
             gi = clamp(gi, ivec3(0), ivec3(uGridSize - 1));
             uint cellIdx = texelFetch(uCellIndex, gi, 0).r;
             if (cellIdx == OUTSIDE) {
-              t += STEP_SIZE;
+              t += stepSize;
               continue;
             }
 
@@ -533,7 +539,7 @@
               vec3 duvw = inverse(J) * b;
               vec3 uvw = vec3(0.5) + duvw;
               if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
-                t += STEP_SIZE;
+                t += stepSize;
                 continue;
               }
 
@@ -554,7 +560,7 @@
               accAlpha += (1.0 - accAlpha) * a;
             }
 
-            t += STEP_SIZE;
+            t += stepSize;
           }
           outColor = vec4(accColor + (1.0 - accAlpha) * vec3(0.04, 0.06, 0.09), 1.0);
         }
