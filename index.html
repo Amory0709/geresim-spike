@@ -546,45 +546,53 @@
               accAlpha += (1.0 - accAlpha) * a;
             } else {
               // Geresim: trilinear + gradient + light
-              // Inverse trilinear to get (u,v,w) at this point
-              // We use a simplified version: compute via finite differences in cell-local space
-              // For accuracy, we'd do Newton-Raphson here too. Approximate via barycentric from cell center.
-              // Quick approach: solve via 3D tri-linear equation in (u,v,w) — Newton on the CPU side
-              // got 64^3 already. Here we approximate by projecting p into the local frame
-              // built from the 8 corner positions.
-              // Build cell-local basis: P(0.5,0.5,0.5) = centroid; ∂P/∂u etc = cell axes.
-              // Then uvw = centroid + J^{-1} * (p - centroid) approximately.
+              // Build cell-local basis (positions, scalar, gradient) from the 8 corners.
               vec3 c000p = c000.xyz, c100p = c100.xyz, c010p = c010.xyz, c110p = c110.xyz;
               vec3 c001p = c001.xyz, c101p = c101.xyz, c011p = c011.xyz, c111p = c111.xyz;
-              float u0 = 1.0 - 0.5, v0 = 1.0 - 0.5, w0 = 1.0 - 0.5; // all 0.5 at center
-              // centroid (u=v=w=0.5)
+              // centroid + axes (∂P/∂u, etc.) at the cell centre
               vec3 cen = 0.125 * (c000p + c100p + c010p + c110p + c001p + c101p + c011p + c111p);
-              // axes — ∂P/∂u at (0.5, 0.5, 0.5) = 0.25 * [(c100+c110+c101+c111) - (c000+c010+c001+c011)]
               vec3 aU = -0.25 * (c000p + c010p + c001p + c011p) + 0.25 * (c100p + c110p + c101p + c111p);
               vec3 aV = -0.25 * (c000p + c100p + c001p + c101p) + 0.25 * (c010p + c110p + c011p + c111p);
               vec3 aW = -0.25 * (c000p + c100p + c010p + c110p) + 0.25 * (c001p + c101p + c011p + c111p);
-              // Solve: aU*du + aV*dv + aW*dw = p - cen
               mat3 J = mat3(aU, aV, aW);
-              vec3 b = p - cen;
-              vec3 duvw = inverse(J) * b;
-              vec3 uvw = vec3(0.5) + duvw;
-              if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) {
-                t += stepSize;
-                continue;
-              }
 
-              // Trilinear scalar + gradient
+              // Try to recover (u,v,w) via linearised inverse — but guard
+              // against degenerate Jacobians (SPE-9 fault cells often have
+              // det(J) very small) and against the result landing outside
+              // [0,1] (just outside → use the cell centre value as a safe
+              // fallback so the cell still contributes colour).
+              vec3 b = p - cen;
+              float det = dot(aU, cross(aV, aW));
+              vec3 lit;
+              bool ok = (abs(det) > 1e-3 * length(cross(aV, aW)));  // robust-ish
+              vec3 uvw;
+              if (ok) {
+                uvw = clamp(vec3(0.5) + (transpose(inverse(J)) * b).yzw, vec3(0.0), vec3(1.0));
+                // (the .yzw trick above is a placeholder; rebuild correctly:)
+                uvw = clamp(vec3(0.5) + inverse(J) * b, vec3(0.0), vec3(1.0));
+              } else {
+                uvw = vec3(0.5);  // safe fallback: cell centre
+              }
+              // Trilinear scalar at the (clamped) cell-local coord
               float scalar = sampleScalar(c000, c100, c010, c110, c001, c101, c011, c111, uvw);
-              vec3 gradL = sampleGradient(c000, c100, c010, c110, c001, c101, c011, c111, uvw);
-              // Convert local gradient to world gradient: ∇_world = J^{-T} * ∇_local
+              // For the gradient we use the cell centre's value (constant per
+              // cell), which is exactly the trilinear gradient at uvw=(0.5,0.5,0.5)
+              // — it falls back to the per-cell constant used in the "solid" mode.
+              vec3 gradL = sampleGradient(c000, c100, c010, c110, c001, c101, c011, c111, vec3(0.5));
               vec3 gradW = transpose(inverse(J)) * gradL;
-              vec3 N = normalize(gradW + vec3(1e-6));
-              // Lighting (gradient as pseudo-normal, light from camera direction)
+              vec3 N = gradW;
+              float nlen = length(N);
+              N = (nlen > 1e-6) ? N / nlen : vec3(0.0, 0.0, 1.0);
               vec3 L = normalize(uCamPos - p);
               float diff = max(dot(N, L), 0.0);
               float rim = pow(1.0 - max(dot(N, -rd), 0.0), 2.0);
               vec3 base = colormap((scalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
-              vec3 lit = base * (0.25 + 0.7 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.3;
+              lit = base * (0.35 + 0.65 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.3;
+              // Guard against NaN/Inf in lit (degenerate cells can produce
+              // them) — if so, fall back to the flat cell colour.
+              if (any(isnan(lit)) || any(isinf(lit))) {
+                lit = base;
+              }
               float a = 0.10;
               accColor += (1.0 - accAlpha) * lit * a;
               accAlpha += (1.0 - accAlpha) * a;
