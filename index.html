@@ -292,7 +292,11 @@
     renderer.setSize(innerWidth, innerHeight);
     document.body.appendChild(renderer.domElement);
 
-    const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 0.001, 100);
+    // Camera near/far must scale with the model — 100 fits hexa.vtk (~0.96)
+    // but clips SPE-9 (reservoir in feet, ~7200 wide). Use the bbox diagonal
+    // as the unit so any model fits comfortably.
+    const bboxDiagForCam = bbox.getSize(new THREE.Vector3()).length();
+    const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, bboxDiagForCam * 0.001, bboxDiagForCam * 5);
     const center = bbox.getCenter(new THREE.Vector3());
     const radius = bbox.getSize(new THREE.Vector3()).length() * 0.5;
     camera.position.set(center.x + radius * 1.2, center.y + radius * 0.6, center.z + radius * 1.2);
