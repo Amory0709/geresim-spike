@@ -27,6 +27,7 @@
     <div class="row"><span>cells</span><span id="s-cells">—</span></div>
     <div class="row"><span>points</span><span id="s-points">—</span></div>
     <div class="row"><span>grid</span><span id="s-grid">—</span></div>
+    <div class="row"><span>scalar</span><span id="s-range">—</span></div>
     <div class="row"><span>fps</span><span id="s-fps">—</span></div>
     <div class="row"><span>mode</span><span>
       <button data-m="0" id="m0">wire</button>
@@ -136,10 +137,27 @@
 
   // ---------- main ----------
   (async function main() {
-    const txt = await fetch('candidates/hexa.vtk').then(r => r.text());
+    // File is selected via ?file= query (default: hexa, the AMR test mesh).
+    // Other options: ?file=spe9 (real reservoir, porosity ~0.08-0.17).
+    const urlParams = new URLSearchParams(location.search);
+    const dataFile = urlParams.get('file') === 'spe9' ? 'candidates/spe9.vtk' : 'candidates/hexa.vtk';
+    console.info(`[spike-b] loading ${dataFile}`);
+    const txt = await fetch(dataFile).then(r => r.text());
     const mesh = parseVTK(txt);
     document.getElementById('s-cells').textContent = mesh.nCells.toLocaleString();
     document.getElementById('s-points').textContent = mesh.nPoints.toLocaleString();
+
+    // Compute scalar min/max for colormap scaling (so different datasets use
+    // the full color range instead of getting squashed by a hardcoded /20).
+    let sMin = Infinity, sMax = -Infinity;
+    for (let i = 0; i < mesh.scalars.length; i++) {
+      if (mesh.scalars[i] < sMin) sMin = mesh.scalars[i];
+      if (mesh.scalars[i] > sMax) sMax = mesh.scalars[i];
+    }
+    uniforms.uScalarMin.value = sMin;
+    uniforms.uScalarMax.value = sMax;
+    console.info(`[spike-b] scalar range: ${sMin.toFixed(3)} to ${sMax.toFixed(3)}`);
+    document.getElementById('s-range').textContent = `${sMin.toFixed(2)} to ${sMax.toFixed(2)}`;
 
     // Compute bbox
     const bbox = new THREE.Box3();
@@ -152,12 +170,19 @@
 
     // ----- Build cell data 2D texture (8 corners × nCells, RGBA32F) -----
     // Each cell row: 8 vec4 = (x, y, z, scalar) for the 8 corners
-    const W = 8, H = mesh.nCells;
+    // Texture layout: pack K cells per row to keep both dims under WebGL2's
+    // minimum-guaranteed max texture size (2048). Each cell still occupies
+    // 8 contiguous texels; the shader converts (cellIdx, cornerIdx) →
+    // (col = cornerIdx + 8*(cellIdx % K), row = cellIdx / K) via uniforms.
+    const K = 16;
+    const W = 8 * K, H = Math.ceil(mesh.nCells / K);
     const cellData = new Float32Array(W * H * 4);
     for (let c = 0; c < mesh.nCells; c++) {
+      const row = Math.floor(c / K);
+      const colBase = (c % K) * 8;
       for (let k = 0; k < 8; k++) {
         const pi = mesh.cellConn[c*8 + k];
-        const idx = (c * W + k) * 4;
+        const idx = (row * W + colBase + k) * 4;
         cellData[idx]   = mesh.positions[pi*3];
         cellData[idx+1] = mesh.positions[pi*3+1];
         cellData[idx+2] = mesh.positions[pi*3+2];
@@ -321,6 +346,9 @@
       uCamUp:     { value: new THREE.Vector3() },
       uMode:      { value: 2 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
+      uScalarMin: { value: 0.0 },
+      uScalarMax: { value: 20.0 },
+      uTexK:      { value: 16 },  // cells per row in the cellData texture
     };
     const mat = new THREE.ShaderMaterial({
       uniforms,
@@ -352,6 +380,9 @@
         uniform vec3  uCamUp;
         uniform float uFovY;
         uniform int   uMode;
+        uniform float uScalarMin;
+        uniform float uScalarMax;
+        uniform int   uTexK;  // cells per row in cellData texture
 
         const float STEP_SIZE = 0.004;   // of model-space units; tune
         const float EPS = 0.001;
@@ -449,15 +480,19 @@
               continue;
             }
 
-            // Sample the 8 corner data for this cell
-            vec4 c000 = texelFetch(uCellData, ivec2(0, int(cellIdx)), 0);
-            vec4 c100 = texelFetch(uCellData, ivec2(1, int(cellIdx)), 0);
-            vec4 c010 = texelFetch(uCellData, ivec2(2, int(cellIdx)), 0);
-            vec4 c110 = texelFetch(uCellData, ivec2(3, int(cellIdx)), 0);
-            vec4 c001 = texelFetch(uCellData, ivec2(4, int(cellIdx)), 0);
-            vec4 c101 = texelFetch(uCellData, ivec2(5, int(cellIdx)), 0);
-            vec4 c011 = texelFetch(uCellData, ivec2(6, int(cellIdx)), 0);
-            vec4 c111 = texelFetch(uCellData, ivec2(7, int(cellIdx)), 0);
+            // Sample the 8 corner data for this cell. Each cell occupies
+            // 8 contiguous texels in row-major order: row = cellIdx / K,
+            // col = (cellIdx % K) * 8 + cornerIdx.
+            int cRow = int(cellIdx) / uTexK;
+            int cCol = (int(cellIdx) % uTexK) * 8;
+            vec4 c000 = texelFetch(uCellData, ivec2(cCol + 0, cRow), 0);
+            vec4 c100 = texelFetch(uCellData, ivec2(cCol + 1, cRow), 0);
+            vec4 c010 = texelFetch(uCellData, ivec2(cCol + 2, cRow), 0);
+            vec4 c110 = texelFetch(uCellData, ivec2(cCol + 3, cRow), 0);
+            vec4 c001 = texelFetch(uCellData, ivec2(cCol + 4, cRow), 0);
+            vec4 c101 = texelFetch(uCellData, ivec2(cCol + 5, cRow), 0);
+            vec4 c011 = texelFetch(uCellData, ivec2(cCol + 6, cRow), 0);
+            vec4 c111 = texelFetch(uCellData, ivec2(cCol + 7, cRow), 0);
 
             if (uMode == 0) {
               // Wire: just darken the cell center a bit so the wireframe shows
@@ -466,7 +501,7 @@
             } else if (uMode == 1) {
               // Solid: per-cell constant color from average of 8 corner scalars
               float s = (c000.w + c100.w + c010.w + c110.w + c001.w + c101.w + c011.w + c111.w) / 8.0;
-              vec3 c = colormap(s / 20.0); // scale: hexa scalars ~0..20
+              vec3 c = colormap((s - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
               float a = 0.18;
               accColor += (1.0 - accAlpha) * c * a;
               accAlpha += (1.0 - accAlpha) * a;
@@ -509,7 +544,7 @@
               vec3 L = normalize(uCamPos - p);
               float diff = max(dot(N, L), 0.0);
               float rim = pow(1.0 - max(dot(N, -rd), 0.0), 2.0);
-              vec3 base = colormap(scalar / 20.0);
+              vec3 base = colormap((scalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
               vec3 lit = base * (0.25 + 0.7 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.3;
               float a = 0.10;
               accColor += (1.0 - accAlpha) * lit * a;
