@@ -324,6 +324,7 @@
     };
     const mat = new THREE.ShaderMaterial({
       uniforms,
+      glslVersion: THREE.GLSL3,  // shader uses GLSL 3.0 features (in/out, usampler3D, etc.)
       vertexShader: /* glsl */`
         out vec2 vUv;
         void main() {
@@ -336,7 +337,9 @@
         precision highp int;
         precision highp usampler3D;  // GLSL ES 3.0: integer samplers need explicit precision
         in vec2 vUv;
-        out vec4 outColor;
+        // Note: GLSL 1.0 style output via gl_FragColor — Three.js (with glslVersion: GLSL3)
+        // auto-replaces this with its own pc_fragColor and the layout. Don't add an explicit
+        // 'out' here or we'll have two fragment outputs → location error.
         uniform vec3  uBboxMin;
         uniform vec3  uBboxMax;
         uniform sampler2D uCellData;     // 8 × nCells, RGBA32F: (x,y,z,scalar) per corner
@@ -415,7 +418,7 @@
 
           // Ray-mesh AABB
           vec2 tHit = rayAABB(ro, rd, uBboxMin - vec3(EPS), uBboxMax + vec3(EPS));
-          if (tHit.y < max(tHit.x, 0.0)) { outColor = vec4(0.04, 0.06, 0.09, 1.0); return; }
+          if (tHit.y < max(tHit.x, 0.0)) { gl_FragColor = vec4(0.04, 0.06, 0.09, 1.0); return; }
           float t = max(tHit.x, 0.0);
           float tEnd = tHit.y;
 
@@ -457,7 +460,7 @@
 
             if (uMode == 0) {
               // Wire: just darken the cell center a bit so the wireframe shows
-              outColor = vec4(0.10, 0.16, 0.22, 1.0);
+              gl_FragColor = vec4(0.10, 0.16, 0.22, 1.0);
               return;
             } else if (uMode == 1) {
               // Solid: per-cell constant color from average of 8 corner scalars
@@ -514,7 +517,7 @@
 
             t += STEP_SIZE;
           }
-          outColor = vec4(accColor + (1.0 - accAlpha) * vec3(0.04, 0.06, 0.09), 1.0);
+          gl_FragColor = vec4(accColor + (1.0 - accAlpha) * vec3(0.04, 0.06, 0.09), 1.0);
         }
       `,
     });
