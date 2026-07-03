@@ -194,7 +194,7 @@
     // Format: R32UI (0xFFFFFFFF = outside any cell).
     // Acceleration: 8^3 coarse grid maps each tile to a list of cells whose AABB
     // touches the tile. Per-voxel test scans only those candidate cells.
-    const GRID = 32;
+    const GRID = 64;  // finer grid — SPE-9 cells average ~17 ft, voxels ~12 ft at 64³
     const COARSE = 8;
     const data3D = new Uint32Array(GRID * GRID * GRID);
     data3D.fill(0xFFFFFFFF);
@@ -545,54 +545,31 @@
               accColor += (1.0 - accAlpha) * c * a;
               accAlpha += (1.0 - accAlpha) * a;
             } else {
-              // Geresim: trilinear + gradient + light
-              // Build cell-local basis (positions, scalar, gradient) from the 8 corners.
+              // Geresim (simplified): use the cell CENTRE scalar (average of
+              // 8 corners) and a constant per-cell pseudo-normal derived
+              // from the cell's bounding box. This skips the inverse
+              // trilinear (which breaks on degenerate cells) but still
+              // produces a per-cell constant that we can shade.
+              float scalar = 0.125 * (c000.w + c100.w + c010.w + c110.w
+                                    + c001.w + c101.w + c011.w + c111.w);
               vec3 c000p = c000.xyz, c100p = c100.xyz, c010p = c010.xyz, c110p = c110.xyz;
               vec3 c001p = c001.xyz, c101p = c101.xyz, c011p = c011.xyz, c111p = c111.xyz;
-              // centroid + axes (∂P/∂u, etc.) at the cell centre
-              vec3 cen = 0.125 * (c000p + c100p + c010p + c110p + c001p + c101p + c011p + c111p);
-              vec3 aU = -0.25 * (c000p + c010p + c001p + c011p) + 0.25 * (c100p + c110p + c101p + c111p);
-              vec3 aV = -0.25 * (c000p + c100p + c001p + c101p) + 0.25 * (c010p + c110p + c011p + c111p);
-              vec3 aW = -0.25 * (c000p + c100p + c010p + c110p) + 0.25 * (c001p + c101p + c011p + c111p);
-              mat3 J = mat3(aU, aV, aW);
-
-              // Try to recover (u,v,w) via linearised inverse — but guard
-              // against degenerate Jacobians (SPE-9 fault cells often have
-              // det(J) very small) and against the result landing outside
-              // [0,1] (just outside → use the cell centre value as a safe
-              // fallback so the cell still contributes colour).
-              vec3 b = p - cen;
-              float det = dot(aU, cross(aV, aW));
-              vec3 lit;
-              bool ok = (abs(det) > 1e-3 * length(cross(aV, aW)));  // robust-ish
-              vec3 uvw;
-              if (ok) {
-                uvw = clamp(vec3(0.5) + (transpose(inverse(J)) * b).yzw, vec3(0.0), vec3(1.0));
-                // (the .yzw trick above is a placeholder; rebuild correctly:)
-                uvw = clamp(vec3(0.5) + inverse(J) * b, vec3(0.0), vec3(1.0));
-              } else {
-                uvw = vec3(0.5);  // safe fallback: cell centre
-              }
-              // Trilinear scalar at the (clamped) cell-local coord
-              float scalar = sampleScalar(c000, c100, c010, c110, c001, c101, c011, c111, uvw);
-              // For the gradient we use the cell centre's value (constant per
-              // cell), which is exactly the trilinear gradient at uvw=(0.5,0.5,0.5)
-              // — it falls back to the per-cell constant used in the "solid" mode.
-              vec3 gradL = sampleGradient(c000, c100, c010, c110, c001, c101, c011, c111, vec3(0.5));
-              vec3 gradW = transpose(inverse(J)) * gradL;
-              vec3 N = gradW;
-              float nlen = length(N);
-              N = (nlen > 1e-6) ? N / nlen : vec3(0.0, 0.0, 1.0);
+              vec3 mn = min(min(min(min(c000p, c100p), min(c010p, c110p)),
+                            min(min(c001p, c101p), min(c011p, c111p)));
+              vec3 mx = max(max(max(max(c000p, c100p), max(c010p, c110p)),
+                            max(max(c001p, c101p), max(c011p, c111p)));
+              vec3 diag = mx - mn;
+              // Use the longest bbox axis as the cell's "up" so the lighting
+              // varies between cells. (This is the cheap version of the
+              // Miranda-Celes gradient-as-normal trick — constant per cell
+              // rather than the true trilinear gradient.)
+              vec3 N = diag / max(length(diag), 1e-6);
               vec3 L = normalize(uCamPos - p);
               float diff = max(dot(N, L), 0.0);
               float rim = pow(1.0 - max(dot(N, -rd), 0.0), 2.0);
               vec3 base = colormap((scalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
-              lit = base * (0.35 + 0.65 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.3;
-              // Guard against NaN/Inf in lit (degenerate cells can produce
-              // them) — if so, fall back to the flat cell colour.
-              if (any(isnan(lit)) || any(isinf(lit))) {
-                lit = base;
-              }
+              vec3 lit = base * (0.4 + 0.5 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.25;
+              if (any(isnan(lit)) || any(isinf(lit))) lit = base;
               float a = 0.10;
               accColor += (1.0 - accAlpha) * lit * a;
               accAlpha += (1.0 - accAlpha) * a;
