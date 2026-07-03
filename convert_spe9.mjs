@@ -174,7 +174,7 @@ for (let c = 0; c < nActive; c++) {
 }
 lines.push('', `CELL_TYPES ${nActive}`);
 for (let c = 0; c < nActive; c++) lines.push('12');
-lines.push('', `POINT_DATA ${nPoints}`, 'SCALARS porosity float', 'LOOKUP_TABLE default');
+lines.push('', `POINT_DATA ${nPoints}`, 'SCALARS scalars float', 'LOOKUP_TABLE default');
 for (let i = 0; i < nPoints; i++) lines.push(pointScalar[i].toFixed(6));
 
 writeFileSync(OUT_VTK, lines.join('\n') + '\n');
