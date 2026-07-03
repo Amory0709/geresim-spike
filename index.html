@@ -149,15 +149,12 @@
 
     // Compute scalar min/max for colormap scaling (so different datasets use
     // the full color range instead of getting squashed by a hardcoded /20).
+    // (Set into uniforms below, after the uniforms object is created.)
     let sMin = Infinity, sMax = -Infinity;
     for (let i = 0; i < mesh.scalars.length; i++) {
       if (mesh.scalars[i] < sMin) sMin = mesh.scalars[i];
       if (mesh.scalars[i] > sMax) sMax = mesh.scalars[i];
     }
-    uniforms.uScalarMin.value = sMin;
-    uniforms.uScalarMax.value = sMax;
-    console.info(`[spike-b] scalar range: ${sMin.toFixed(3)} to ${sMax.toFixed(3)}`);
-    document.getElementById('s-range').textContent = `${sMin.toFixed(2)} to ${sMax.toFixed(2)}`;
 
     // Compute bbox
     const bbox = new THREE.Box3();
@@ -350,6 +347,12 @@
       uScalarMax: { value: 20.0 },
       uTexK:      { value: 16 },  // cells per row in the cellData texture
     };
+    // Wire the dynamic scalar range (computed above) into the shader so
+    // every dataset gets the full rainbow regardless of value range.
+    uniforms.uScalarMin.value = sMin;
+    uniforms.uScalarMax.value = sMax;
+    console.info(`[spike-b] scalar range: ${sMin.toFixed(3)} to ${sMax.toFixed(3)}`);
+    document.getElementById('s-range').textContent = `${sMin.toFixed(2)} to ${sMax.toFixed(2)}`;
     const mat = new THREE.ShaderMaterial({
       uniforms,
       glslVersion: THREE.GLSL3,  // shader uses GLSL 3.0 features (in/out, usampler3D, etc.)
