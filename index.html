@@ -334,6 +334,7 @@
       fragmentShader: /* glsl */`
         precision highp float;
         precision highp int;
+        precision highp usampler3D;  // GLSL ES 3.0: integer samplers need explicit precision
         in vec2 vUv;
         out vec4 outColor;
         uniform vec3  uBboxMin;
