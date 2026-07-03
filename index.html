@@ -304,16 +304,24 @@
     // cubic bboxes (e.g. hexa.vtk), use the standard diagonal offset. For
     // slab-like bboxes (e.g. SPE-9 reservoir: 7200x7500x777), use the SHORTEST
     // axis as the view direction so the camera looks face-on at the slab.
+    // A small transverse offset is added to the camera so the ray is never
+    // exactly axis-aligned (the slab-method degenerates when ray direction
+    // has zero components, giving tNear == tFar and the ray-march loop
+    // takes only one step).
     let camOffset;
     if (Math.min(bboxSize.x, bboxSize.y, bboxSize.z) < Math.max(bboxSize.x, bboxSize.y, bboxSize.z) * 0.3) {
-      // Slab-like: view along the short axis
+      // Slab-like: view along the short axis, with transverse perturbation
       const shortAxis = bboxSize.x < bboxSize.y && bboxSize.x < bboxSize.z ? 'x'
                       : bboxSize.y < bboxSize.z ? 'y' : 'z';
-      camOffset = new THREE.Vector3(
-        shortAxis === 'x' ? radius * 1.5 : radius * 0.6,
-        shortAxis === 'y' ? radius * 1.5 : radius * 0.6,
-        shortAxis === 'z' ? radius * 1.5 : radius * 0.6,
-      );
+      const along = shortAxis === 'x' ? 'x' : shortAxis === 'y' ? 'y' : 'z';
+      const offset = new THREE.Vector3();
+      offset[along] = radius * 1.5;
+      // Add 7% of the longest axis as a transverse offset
+      const perturb = radius * 0.35;
+      const otherAxes = ['x', 'y', 'z'].filter(a => a !== along);
+      offset[otherAxes[0]] = perturb;
+      offset[otherAxes[1]] = perturb * 0.6;
+      camOffset = offset;
     } else {
       camOffset = new THREE.Vector3(radius * 1.2, radius * 0.6, radius * 1.2);
     }
