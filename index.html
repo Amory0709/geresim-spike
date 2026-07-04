@@ -141,6 +141,12 @@
   // WebGL2 isn't available (e.g. ANGLE/swiftshader blacklist, GPU off).
   // Same algorithm as snap2d.mjs, inlined so the spike stays self-contained.
   function renderCanvas2DFallback(mesh, bbox, sMin, sMax) {
+    // THREE.Box3.min / .max are Vector3 — .x .y .z properties, NOT array indices.
+    // Materialise them as plain [x,y,z] arrays so the views loop can use
+    // bbox.min[ax] / bbox.max[ax] without dragging the rest of the spike into
+    // Vector3-specific syntax.
+    const bMin = [bbox.min.x, bbox.min.y, bbox.min.z];
+    const bMax = [bbox.max.x, bbox.max.y, bbox.max.z];
     const CW = 1320, CH = 1380;
     const canvas = document.createElement('canvas');
     canvas.width = CW; canvas.height = CH;
@@ -196,8 +202,8 @@
       const view = VIEWS[vi];
       const { ox, oy } = layout[vi];
       const ax = view.ax, bx = view.bx;
-      const minA = bbox.min[ax], maxA = bbox.max[ax];
-      const minB = bbox.min[bx], maxB = bbox.max[bx];
+      const minA = bMin[ax], maxA = bMax[ax];
+      const minB = bMin[bx], maxB = bMax[bx];
       const sA = V / Math.max(maxA - minA, 1e-9);
       const sB = V / Math.max(maxB - minB, 1e-9);
       ctx.strokeStyle = '#2a313a'; ctx.lineWidth = 1;
@@ -453,6 +459,7 @@
     if (!webglAvailable) {
       console.warn('[spike-b] WebGL2 unavailable — switching to canvas2D projection fallback');
       document.getElementById('s-build').textContent = 'canvas2D (no WebGL)';
+      document.getElementById('s-range').textContent = `${sMin.toFixed(3)} to ${sMax.toFixed(3)}`;
       renderCanvas2DFallback(mesh, bbox, sMin, sMax);
       return;
     }
