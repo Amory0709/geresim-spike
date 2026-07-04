@@ -27,6 +27,7 @@
     <div class="row"><span>cells</span><span id="s-cells">—</span></div>
     <div class="row"><span>points</span><span id="s-points">—</span></div>
     <div class="row"><span>grid</span><span id="s-grid">—</span></div>
+    <div class="row"><span>build</span><span id="s-build">—</span></div>
     <div class="row"><span>scalar</span><span id="s-range">—</span></div>
     <div class="row"><span>fps</span><span id="s-fps">—</span></div>
     <div class="row"><span>mode</span><span>
@@ -233,48 +234,67 @@
     }
     console.info('[spike-b] coarse grid built');
 
-    // 3) For each fine voxel, find containing cell via coarse-cell list
+    // 3) For each fine voxel, find containing cell via coarse-cell list.
+    //    The build runs ASYNC (one z-slice per microtask) so the loading
+    //    status actually paints in the browser. For SPE-9 (9000 cells,
+    //    64^3 voxels) the synchronous version would freeze the tab for
+    //    5-10s and look like a black screen.
     const tmpCorners = new Float32Array(24);
-    let lastReport = 0;
+    const buildEl = document.getElementById('s-build');
     let totalHits = 0, totalMiss = 0;
-    for (let z = 0; z < GRID; z++) {
-      for (let y = 0; y < GRID; y++) {
-        for (let x = 0; x < GRID; x++) {
-          const wx = bbox.min.x + (x + 0.5) * cellSize.x;
-          const wy = bbox.min.y + (y + 0.5) * cellSize.y;
-          const wz = bbox.min.z + (z + 0.5) * cellSize.z;
-          // Coarse tile
-          const cx = Math.min(COARSE-1, Math.floor((wx - bbox.min.x) / coarseSize.x));
-          const cy = Math.min(COARSE-1, Math.floor((wy - bbox.min.y) / coarseSize.y));
-          const cz = Math.min(COARSE-1, Math.floor((wz - bbox.min.z) / coarseSize.z));
-          const cands = coarseCells[cz * COARSE * COARSE + cy * COARSE + cx];
-          let best = -1;
-          for (let i = 0; i < cands.length; i++) {
-            const c = cands[i];
-            // AABB prefilter
-            if (wx < cellAABBmin[c*3] || wx > cellAABBmax[c*3]) continue;
-            if (wy < cellAABBmin[c*3+1] || wy > cellAABBmax[c*3+1]) continue;
-            if (wz < cellAABBmin[c*3+2] || wz > cellAABBmax[c*3+2]) continue;
-            // Newton-Raphson
-            // VTK hex vertex order: c000, c100, c110, c010, c001, c101, c111, c011
-            // inverseTrilinear expects:                       c000, c100, c010, c110, c001, c101, c011, c111
-            // remap on read so tmpCorners is in the expected order
-            const VTK_TO_STD = [0, 1, 3, 2, 4, 5, 7, 6];
-            for (let k = 0; k < 8; k++) {
-              const pi = mesh.cellConn[c*8 + VTK_TO_STD[k]];
-              tmpCorners[k*3]   = mesh.positions[pi*3];
-              tmpCorners[k*3+1] = mesh.positions[pi*3+1];
-              tmpCorners[k*3+2] = mesh.positions[pi*3+2];
-            }
-            const uvw = inverseTrilinear(tmpCorners, [wx, wy, wz]);
-            if (uvw) { best = c; break; }
-          }
-          if (best >= 0) { data3D[z * GRID * GRID + y * GRID + x] = best; totalHits++; }
-          else totalMiss++;
-        }
-      }
-      if (z - lastReport >= 4) { console.info(`[spike-b] cell index z=${z}/${GRID}`); lastReport = z; }
+    const buildStart = performance.now();
+
+    function yieldToBrowser() {
+      return new Promise(r => setTimeout(r, 0));
     }
+
+    async function buildIndex() {
+      for (let z = 0; z < GRID; z++) {
+        for (let y = 0; y < GRID; y++) {
+          for (let x = 0; x < GRID; x++) {
+            const wx = bbox.min.x + (x + 0.5) * cellSize.x;
+            const wy = bbox.min.y + (y + 0.5) * cellSize.y;
+            const wz = bbox.min.z + (z + 0.5) * cellSize.z;
+            // Coarse tile
+            const cx = Math.min(COARSE-1, Math.floor((wx - bbox.min.x) / coarseSize.x));
+            const cy = Math.min(COARSE-1, Math.floor((wy - bbox.min.y) / coarseSize.y));
+            const cz = Math.min(COARSE-1, Math.floor((wz - bbox.min.z) / coarseSize.z));
+            const cands = coarseCells[cz * COARSE * COARSE + cy * COARSE + cx];
+            let best = -1;
+            for (let i = 0; i < cands.length; i++) {
+              const c = cands[i];
+              // AABB prefilter
+              if (wx < cellAABBmin[c*3] || wx > cellAABBmax[c*3]) continue;
+              if (wy < cellAABBmin[c*3+1] || wy > cellAABBmax[c*3+1]) continue;
+              if (wz < cellAABBmin[c*3+2] || wz > cellAABBmax[c*3+2]) continue;
+              // inverseTrilinear expects corners in order:
+              //   c000, c100, c010, c110, c001, c101, c011, c111
+              // VTK hex vertex order is:
+              //   c000, c100, c110, c010, c001, c101, c111, c011
+              // remap on read so tmpCorners is in the expected order
+              const VTK_TO_STD = [0, 1, 3, 2, 4, 5, 7, 6];
+              for (let k = 0; k < 8; k++) {
+                const pi = mesh.cellConn[c*8 + VTK_TO_STD[k]];
+                tmpCorners[k*3]   = mesh.positions[pi*3];
+                tmpCorners[k*3+1] = mesh.positions[pi*3+1];
+                tmpCorners[k*3+2] = mesh.positions[pi*3+2];
+              }
+              const uvw = inverseTrilinear(tmpCorners, [wx, wy, wz]);
+              if (uvw) { best = c; break; }
+            }
+            if (best >= 0) { data3D[z * GRID * GRID + y * GRID + x] = best; totalHits++; }
+            else totalMiss++;
+          }
+        }
+        // Paint progress every slice so the user sees the build moving
+        const pct = Math.round((z + 1) / GRID * 100);
+        buildEl.textContent = `${pct}% (${(performance.now() - buildStart) / 1000 | 0}s)`;
+        await yieldToBrowser();
+      }
+    }
+    await buildIndex();
+    console.info(`[spike-b] cell index: hits=${totalHits} miss=${totalMiss} (${((performance.now() - buildStart) / 1000).toFixed(1)}s)`);
+    buildEl.textContent = `done (hits=${totalHits})`;
     console.info(`[spike-b] cell index: hits=${totalHits} miss=${totalMiss}`);
     const cellIndexTex = new THREE.Data3DTexture(data3D, GRID, GRID, GRID);
     cellIndexTex.format = THREE.RedIntegerFormat;
@@ -500,9 +520,9 @@
           float accAlpha = 0.0;
 
           // March
-          int STEPS = 400;
+          int STEPS = 600;
           if (uMode == 0) { STEPS = 1; } // wire: just ray-AABB hit, draw edges via a later pass
-          if (uMode == 1) { STEPS = 200; } // solid: take 200 samples, no lighting
+          if (uMode == 1) { STEPS = 300; } // solid: take 300 samples, no lighting
 
           for (int s = 0; s < 400; s++) {
             if (s >= STEPS) break;
@@ -570,7 +590,11 @@
               vec3 base = colormap((scalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
               vec3 lit = base * (0.4 + 0.5 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.25;
               if (any(isnan(lit)) || any(isinf(lit))) lit = base;
-              float a = 0.10;
+              // Higher per-step alpha (0.18) so a small number of cells in
+              // thin layers still produce visible color. With 600 STEPS the
+              // ray covers the bbox at stepSize = diag/200 and gets ~10
+              // samples per typical SPE-9 cell.
+              float a = 0.18;
               accColor += (1.0 - accAlpha) * lit * a;
               accAlpha += (1.0 - accAlpha) * a;
             }
