@@ -140,7 +140,11 @@
   // Three ortho projections of the mesh, drawn with Canvas2D. Used when
   // WebGL2 isn't available (e.g. ANGLE/swiftshader blacklist, GPU off).
   // Same algorithm as snap2d.mjs, inlined so the spike stays self-contained.
-  function renderCanvas2DFallback(mesh, bbox, sMin, sMax) {
+  // `webglErr` (optional) — if non-null, the WebGL path failed and this
+  // function will render the error message prominently so the user can
+  // tell us what actually broke (rather than guessing from a black/empty
+  // viewport).
+  function renderCanvas2DFallback(mesh, bbox, sMin, sMax, webglErr) {
     // THREE.Box3.min / .max are Vector3 — .x .y .z properties, NOT array indices.
     // Materialise them as plain [x,y,z] arrays so the views loop can use
     // bbox.min[ax] / bbox.max[ax] without dragging the rest of the spike into
@@ -154,6 +158,26 @@
     document.body.appendChild(canvas);
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#0a0d11'; ctx.fillRect(0, 0, CW, CH);
+
+    // WebGL failure banner — only drawn when this fallback is reached
+    // because the WebGL path threw, not because the user asked for ?force2d.
+    // Renders at the very top of the canvas so the user can screenshot it
+    // and tell us exactly what failed in their browser/driver.
+    if (webglErr) {
+      const msg = String(webglErr.message || webglErr);
+      ctx.fillStyle = '#5a1a1a';
+      ctx.fillRect(0, 0, CW, 60);
+      ctx.fillStyle = '#ffe9c2';
+      ctx.font = 'bold 16px monospace';
+      ctx.fillText('WebGL failed in this browser — fell back to canvas2D', 14, 24);
+      ctx.font = '13px monospace';
+      ctx.fillStyle = '#ffd58a';
+      ctx.fillText('Error: ' + msg.slice(0, 110), 14, 44);
+      // Sub-header: where to report it
+      ctx.fillStyle = '#cfd6e0';
+      ctx.font = '11px monospace';
+      ctx.fillText('(Open DevTools console for the full stack trace)', 14, 58);
+    }
 
     // Per-cell corner list + mean scalar
     const cells = new Array(mesh.nCells);
@@ -257,11 +281,15 @@
             if (p[ax] < mnA) mnA = p[ax]; if (p[ax] > mxA) mxA = p[ax];
             if (p[bx] < mnB) mnB = p[bx]; if (p[bx] > mxB) mxB = p[bx];
           }
+          // Min 1px so zero-extent cells (corner-point cells whose face
+          // is degenerate in the projection plane — e.g. j=0 column at
+          // the reservoir front) are still visible as a thin strip rather
+          // than vanishing entirely.
           ctx.rect(
             ox + (mnA - minA) * sA,
             oy + V - (mxB - minB) * sB,
-            (mxA - mnA) * sA,
-            (mxB - mnB) * sB
+            Math.max((mxA - mnA) * sA, 1),
+            Math.max((mxB - mnB) * sB, 1)
           );
         }
         ctx.fill(); ctx.stroke();
@@ -467,7 +495,8 @@
       console.warn(`[spike-b] canvas2D mode (${reason})`);
       document.getElementById('s-build').textContent = `canvas2D (${reason})`;
       document.getElementById('s-range').textContent = `${sMin.toFixed(3)} to ${sMax.toFixed(3)}`;
-      renderCanvas2DFallback(mesh, bbox, sMin, sMax);
+      // Pass null for webglErr — the user opted into canvas2D on purpose.
+      renderCanvas2DFallback(mesh, bbox, sMin, sMax, null);
       return;
     }
 
@@ -855,7 +884,9 @@
 
     // Render loop + camera basis
     let frame = 0, lastFps = performance.now();
+    let firstRenderFailed = null;
     function animate() {
+      try {
       updateCamera();
       // Update camera basis uniforms
       uniforms.uCamPos.value.copy(camera.position);
@@ -879,17 +910,32 @@
         frame = 0;
         lastFps = now;
       }
+      } catch (renderErr) {
+        // First-frame GL error (rare, but happens on some Mesa drivers
+        // and on iOS Safari when texture upload races with shader bind).
+        // Throw out of animate so the outer catch picks it up.
+        if (firstRenderFailed === null) {
+          firstRenderFailed = renderErr;
+          throw renderErr;
+        }
+        return;
+      }
       requestAnimationFrame(animate);
     }
+    // Kick off — any sync setup error or first-frame render error is caught
+    // by the outer try/catch and the canvas2D fallback banner takes over.
     animate();
     } catch (webglErr) {
       // Clean up any partial canvas Three.js may have appended, then hand
       // off to the canvas2D projector so the spike still delivers a picture.
+      // Pass the error to renderCanvas2DFallback so it gets painted into
+      // the canvas itself (top banner, red/yellow) — the HUD overlay alone
+      // is too easy to miss when the canvas covers the whole viewport.
       console.error('[spike-b] WebGL path failed → canvas2D fallback:', webglErr);
       document.body.querySelectorAll('canvas').forEach(c => c.remove());
-      document.getElementById('s-build').textContent = `canvas2D (WebGL failed: ${webglErr.message?.slice(0, 40) || 'unknown'})`;
+      document.getElementById('s-build').textContent = `canvas2D (WebGL failed)`;
       document.getElementById('s-range').textContent = `${sMin.toFixed(3)} to ${sMax.toFixed(3)}`;
-      renderCanvas2DFallback(mesh, bbox, sMin, sMax);
+      renderCanvas2DFallback(mesh, bbox, sMin, sMax, webglErr);
     }
   })().catch(e => showErr(e));
   </script>
