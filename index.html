@@ -442,30 +442,40 @@
     cellIndexTex.magFilter = THREE.NearestFilter;
     document.getElementById('s-grid').textContent = `${GRID}³`;
 
-    // ----- WebGL2 availability probe -----
-    // The headless swiftshader stack (and some locked-down corporate
-    // browsers) can't run our usampler3D-based fragment shader, even
-    // though Chrome itself is on the page. Without a fallback the canvas
-    // would just go black and we'd have no visual to debug. The fallback
-    // is a canvas2D three-view projector — at least the geometry of the
-    // data is observable.
+    // ----- WebGL2 availability probe + robust fallback path -----
+    // Three ways the user can land in canvas2D mode:
+    //   1. ?force2d=1   — query flag, skips WebGL entirely (debug aid)
+    //   2. No WebGL2 context — e.g. locked-down browser, GPU off
+    //   3. WebGL setup throws — e.g. shader compile error on the user's
+    //      driver (older Mesa, ANGLE before some version, etc.)
+    // Without this fallback the user just sees a black canvas and has no
+    // way to tell whether it's data, shader, or rendering-pipeline.
+    const urlParams2 = new URLSearchParams(location.search);
+    const force2D = urlParams2.get('force2d') !== null;
     const probeCanvas = document.createElement('canvas');
-    let webglAvailable = false;
-    try {
-      webglAvailable = !!probeCanvas.getContext('webgl2');
-    } catch (e) {
-      webglAvailable = false;
+    let webglAvailable = !force2D;
+    if (webglAvailable) {
+      try {
+        webglAvailable = !!probeCanvas.getContext('webgl2');
+      } catch (e) {
+        webglAvailable = false;
+      }
     }
     if (!webglAvailable) {
-      console.warn('[spike-b] WebGL2 unavailable — switching to canvas2D projection fallback');
-      document.getElementById('s-build').textContent = 'canvas2D (no WebGL)';
+      const reason = force2D ? '?force2d' : 'no WebGL2';
+      console.warn(`[spike-b] canvas2D mode (${reason})`);
+      document.getElementById('s-build').textContent = `canvas2D (${reason})`;
       document.getElementById('s-range').textContent = `${sMin.toFixed(3)} to ${sMax.toFixed(3)}`;
       renderCanvas2DFallback(mesh, bbox, sMin, sMax);
       return;
     }
 
-    // ----- Three.js scene -----
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    // ----- Three.js scene (entire setup + render wrapped in try/catch) -----
+    // If anything in the WebGL path throws (shader compile on a finicky
+    // driver, OOM on large Data3DTexture, etc.) we want the canvas2D
+    // fallback to take over so the user always sees *something*.
+    try {
+      const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(innerWidth, innerHeight);
     document.body.appendChild(renderer.domElement);
@@ -820,6 +830,15 @@
       requestAnimationFrame(animate);
     }
     animate();
+    } catch (webglErr) {
+      // Clean up any partial canvas Three.js may have appended, then hand
+      // off to the canvas2D projector so the spike still delivers a picture.
+      console.error('[spike-b] WebGL path failed → canvas2D fallback:', webglErr);
+      document.body.querySelectorAll('canvas').forEach(c => c.remove());
+      document.getElementById('s-build').textContent = `canvas2D (WebGL failed: ${webglErr.message?.slice(0, 40) || 'unknown'})`;
+      document.getElementById('s-range').textContent = `${sMin.toFixed(3)} to ${sMax.toFixed(3)}`;
+      renderCanvas2DFallback(mesh, bbox, sMin, sMax);
+    }
   })().catch(e => showErr(e));
   </script>
 </body>
