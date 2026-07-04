@@ -452,6 +452,7 @@
     // way to tell whether it's data, shader, or rendering-pipeline.
     const urlParams2 = new URLSearchParams(location.search);
     const force2D = urlParams2.get('force2d') !== null;
+    const debugMode = parseInt(urlParams2.get('debug') || '0');
     const probeCanvas = document.createElement('canvas');
     let webglAvailable = !force2D;
     if (webglAvailable) {
@@ -475,7 +476,16 @@
     // driver, OOM on large Data3DTexture, etc.) we want the canvas2D
     // fallback to take over so the user always sees *something*.
     try {
-      const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+      const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true, alpha: true });
+      // Surface shader compile/link errors instead of letting Three.js
+      // silently bind nothing (which is what made the canvas go black
+      // before this commit).
+      renderer.debug.onShaderError = (gl, program, vs, fs) => {
+        const vlog = gl.getShaderInfoLog(vs);
+        const flog = gl.getShaderInfoLog(fs);
+        const plog = gl.getProgramInfoLog(program);
+        console.error('[spike-b] shader error:', { vlog, flog, plog });
+      };
     renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
     renderer.setSize(innerWidth, innerHeight);
     document.body.appendChild(renderer.domElement);
@@ -565,6 +575,7 @@
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
       uTexK:      { value: 16 },  // cells per row in the cellData texture
+      uDebug:     { value: debugMode },
     };
     // Wire the dynamic scalar range (computed above) into the shader so
     // every dataset gets the full rainbow regardless of value range.
@@ -605,6 +616,7 @@
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
+        uniform int   uDebug; // 0 = production, 1 = UV rainbow, 2 = ray-step grayscale
 
         // Cell-index sentinel (uint max = outside any cell).
         const uint OUTSIDE = 0xFFFFFFFFu;
@@ -661,6 +673,31 @@
         }
 
         void main() {
+          // Bypass mode: UV rainbow — confirms render pipeline is alive
+          // (framebuffer, alpha, output, drawElements) without involving
+          // raymarch or cell-index texture. If we see this rainbow the
+          // black-screen issue is NOT a render-pipeline problem; it's
+          // somewhere in the raymarch / cell-index / Miranda-Celes code.
+          if (uDebug == 1) {
+            outColor = vec4(vUv.x, vUv.y, 1.0 - vUv.x * vUv.y, 1.0);
+            return;
+          }
+          // Bypass mode: camera-ray depth as grayscale — if rainbow works
+          // but production doesn't, use ?debug=2 to see whether rays
+          // hit the AABB at all (would show a dim grey silhouette).
+          if (uDebug == 2) {
+            vec3 rd_dbg = normalize(uCamFwd + uCamRight * (vUv.x * 2.0 - 1.0) * tan(uFovY * 0.5)
+                                              + uCamUp    * (vUv.y * 2.0 - 1.0) * tan(uFovY * 0.5));
+            vec3 nrm_dbg = -rd_dbg; // dummy to satisfy old compilers
+            vec2 th_dbg = rayAABB(uCamPos, rd_dbg, uBboxMin, uBboxMax);
+            float t_dbg = max(th_dbg.x, 0.0);
+            float tEnd_dbg = th_dbg.y;
+            float dt_dbg = max(tEnd_dbg - t_dbg, 0.0);
+            float g = clamp(dt_dbg * 0.001, 0.0, 1.0);
+            outColor = vec4(g, g * 0.5, g * 0.2, 1.0);
+            return;
+          }
+
           // Step size adapts to the mesh's bbox so we always cover the full
           // volume regardless of model units. Without this, meshes that are
           // not unit-cube scaled (e.g. SPE-9 in feet) would have STEP_SIZE
@@ -797,6 +834,14 @@
       `,
     });
     const quad = new THREE.Mesh(quadGeom, mat);
+    // Disable frustum culling on the fullscreen quad. PlaneGeometry has its
+    // bounding sphere at world origin (radius ~1.7), but the camera setup
+    // places the camera well above the model and looks at it. Three.js's
+    // CPU-side frustum cull rejects the mesh before drawElements fires,
+    // leading to renderer.info.render.calls === 0 and a black canvas —
+    // the symptom that swallowed earlier sessions under the label
+    // "shader compile error" or "swiftshader black".
+    quad.frustumCulled = false;
     scene.add(quad);
 
     // Mode buttons
@@ -818,6 +863,13 @@
       uniforms.uCamRight.value.copy(new THREE.Vector3().crossVectors(uniforms.uCamFwd.value, camera.up).normalize());
       uniforms.uCamUp.value.copy(new THREE.Vector3().crossVectors(uniforms.uCamRight.value, uniforms.uCamFwd.value).normalize());
       renderer.render(scene, camera);
+
+      // One-shot pipeline-OK indicator on the first frame, useful for
+      // verifying in a real browser console that draw calls are firing
+      // (calls=0 would indicate frustum-culling or shader-link failure).
+      if (frame === 30) {
+        console.info(`[spike-b] first frames: calls=${renderer.info.render.calls} tris=${renderer.info.render.triangles}`);
+      }
 
       frame++;
       const now = performance.now();
