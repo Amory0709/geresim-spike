@@ -596,14 +596,7 @@
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
 
-        // Step size adapts to the mesh's bbox so we always cover the full
-        // volume regardless of model units. Without this, meshes that
-        // are not unit-cube scaled (e.g. SPE-9 in feet) would have STEP_SIZE
-        // that's 1000x too small and the ray wouldn't actually traverse
-        // any cells.
-        float bboxDiag = length(uBboxMax - uBboxMin);
-        float stepSize = max(bboxDiag / 200.0, 1e-5);
-        const float EPS = bboxDiag * 1e-5;
+        // Cell-index sentinel (uint max = outside any cell).
         const uint OUTSIDE = 0xFFFFFFFFu;
 
         // 1D colormap (rainbow-ish, 6 stops)
@@ -658,6 +651,17 @@
         }
 
         void main() {
+          // Step size adapts to the mesh's bbox so we always cover the full
+          // volume regardless of model units. Without this, meshes that are
+          // not unit-cube scaled (e.g. SPE-9 in feet) would have STEP_SIZE
+          // that's 1000x too small and the ray wouldn't actually traverse
+          // any cells. These declarations MUST be inside main(): global-
+          // scope initializers must be constant expressions, and length() of
+          // a uniform difference is not compile-time constant.
+          float bboxDiag = length(uBboxMax - uBboxMin);
+          float stepSize = max(bboxDiag / 200.0, 1e-5);
+          float EPS = bboxDiag * 1e-5;
+
           // Build camera ray for this pixel (no aspect correction — we render square-ish)
           float tanHalf = tan(uFovY * 0.5);
           vec2 ndc = vUv * 2.0 - 1.0;
