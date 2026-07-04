@@ -340,11 +340,18 @@
     const K = 16;
     const W = 8 * K, H = Math.ceil(mesh.nCells / K);
     const cellData = new Float32Array(W * H * 4);
+    // Corner order: shader assumes STD order (c000, c100, c010, c110,
+    // c001, c101, c011, c111) for trilinear interp + gradient. VTK
+    // hex vertex order is (c000, c100, c110, c010, c001, c101, c111,
+    // c011), so remap at write time. Without this, c010↔c110 and
+    // c011↔c111 are swapped, flipping the v/w components of the
+    // cell-basis vectors and gradient → wrong lighting per cell.
+    const VTK_TO_STD = [0, 1, 3, 2, 4, 5, 7, 6];
     for (let c = 0; c < mesh.nCells; c++) {
       const row = Math.floor(c / K);
       const colBase = (c % K) * 8;
       for (let k = 0; k < 8; k++) {
-        const pi = mesh.cellConn[c*8 + k];
+        const pi = mesh.cellConn[c*8 + VTK_TO_STD[k]];
         const idx = (row * W + colBase + k) * 4;
         cellData[idx]   = mesh.positions[pi*3];
         cellData[idx+1] = mesh.positions[pi*3+1];
@@ -650,20 +657,24 @@
         // Cell-index sentinel (uint max = outside any cell).
         const uint OUTSIDE = 0xFFFFFFFFu;
 
-        // 1D colormap (rainbow-ish, 6 stops)
+        // Viridis 5 stops (purple → blue → teal → green → yellow).
+        // Same palette as the canvas2D fallback so the two renderers agree
+        // on what scalar value produces what color. The previous 6-stop
+        // "rainbow-ish" colormap put ORANGE + RED in the middle of the
+        // range, which made the reservoir look psychedelic and made
+        // per-cell lighting differences (from Miranda-Celes gradient)
+        // hard to read as scalar variation.
         vec3 colormap(float t) {
           t = clamp(t, 0.0, 1.0);
-          vec3 c0 = vec3(0.05, 0.05, 0.40);
-          vec3 c1 = vec3(0.10, 0.55, 0.95);
-          vec3 c2 = vec3(0.20, 0.95, 0.85);
-          vec3 c3 = vec3(0.95, 0.95, 0.40);
-          vec3 c4 = vec3(0.95, 0.55, 0.15);
-          vec3 c5 = vec3(0.55, 0.05, 0.05);
-          if (t < 0.20) return mix(c0, c1, t / 0.20);
-          if (t < 0.40) return mix(c1, c2, (t - 0.20) / 0.20);
-          if (t < 0.60) return mix(c2, c3, (t - 0.40) / 0.20);
-          if (t < 0.80) return mix(c3, c4, (t - 0.60) / 0.20);
-          return mix(c4, c5, (t - 0.80) / 0.20);
+          vec3 c0 = vec3(0.267, 0.004, 0.329); // purple
+          vec3 c1 = vec3(0.231, 0.322, 0.545); // blue
+          vec3 c2 = vec3(0.129, 0.569, 0.549); // teal
+          vec3 c3 = vec3(0.369, 0.788, 0.384); // green
+          vec3 c4 = vec3(0.992, 0.906, 0.145); // yellow
+          if (t < 0.25) return mix(c0, c1, t / 0.25);
+          if (t < 0.50) return mix(c1, c2, (t - 0.25) / 0.25);
+          if (t < 0.75) return mix(c2, c3, (t - 0.50) / 0.25);
+          return mix(c3, c4, (t - 0.75) / 0.25);
         }
 
         // Trilinear sample of scalar field at local (u,v,w) within a cell.
@@ -793,8 +804,12 @@
             vec4 c111 = texelFetch(uCellData, ivec2(cCol + 7, cRow), 0);
 
             if (uMode == 0) {
-              // Wire: just darken the cell center a bit so the wireframe shows
-              outColor = vec4(0.10, 0.16, 0.22, 1.0);
+              // Wire mode is intentionally a placeholder (would need
+              // separate edge geometry — not a real implementation).
+              // Render an obvious "not implemented" colour so the user
+              // can tell what they clicked, instead of a misleading
+              // dark-blue that looks like a different render mode.
+              outColor = vec4(0.40, 0.10, 0.10, 1.0);
               return;
             } else if (uMode == 1) {
               // Solid: per-cell constant color from average of 8 corner scalars
