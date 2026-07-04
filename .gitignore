@@ -1,0 +1,12 @@
+# Spike ignores — keep the spike and its shipped data, hide dev artifacts.
+
+# VTK backups from the in-place corner-fix swap
+candidates/*.orig
+
+# Development tooling scripts (snap2d, snap, fix-*, diagnose-*, etc.)
+# Keep smoke_test.mjs since README references it.
+*.mjs
+!smoke_test.mjs
+
+# Generated canvas2D screenshots
+screenshots/
