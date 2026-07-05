@@ -49,6 +49,10 @@
     <div class="row"><span>edge color</span><span>
       <input id="c-edge" type="color" value="#000000" style="width:50px;height:18px;border:1px solid rgba(160,210,255,0.3);background:transparent;cursor:pointer;padding:0;vertical-align:middle;">
     </span></div>
+    <div class="row"><span>body α</span><span>
+      <input id="r-body" type="range" min="0.05" max="0.50" step="0.01" value="0.18" style="width:90px;vertical-align:middle;">
+      <span id="v-body" style="display:inline-block;width:32px;text-align:right;">0.18</span>
+    </span></div>
   </div>
   <div id="err"></div>
 
@@ -631,6 +635,7 @@
       uEdgeAlpha: { value: 0.85 },
       uEdgeSamp:  { value: 1 },
       uEdgeColor: { value: new THREE.Color(0, 0, 0) },
+      uBodyAlpha: { value: 0.18 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
@@ -677,6 +682,7 @@
         uniform float uEdgeAlpha; // line opacity (0 = invisible, 1 = full black)
         uniform int   uEdgeSamp;  // sub-samples per step for edge detection (1..4)
         uniform vec3  uEdgeColor; // line RGB (alpha scaled by uEdgeAlpha)
+        uniform float uBodyAlpha; // per-step alpha for cell shading (controls how 'solid' the body looks)
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
@@ -892,7 +898,7 @@
               // Solid: per-cell constant color from average of 8 corner scalars
               float s = (c000.w + c100.w + c010.w + c110.w + c001.w + c101.w + c011.w + c111.w) / 8.0;
               vec3 c = colormap((s - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
-              float a = 0.18;
+              float a = uBodyAlpha;
               accColor += (1.0 - accAlpha) * c * a;
               accAlpha += (1.0 - accAlpha) * a;
             } else {
@@ -939,11 +945,13 @@
               vec3 base = colormap((scalar - uScalarMin) / max(uScalarMax - uScalarMin, 1e-6));
               vec3 lit = base * (0.4 + 0.5 * diff) + vec3(0.4, 0.6, 0.8) * rim * 0.25;
               if (any(isnan(lit)) || any(isinf(lit))) lit = base;
-              // Higher per-step alpha (0.18) so a small number of cells in
-              // thin layers still produce visible color. With 600 STEPS the
-              // ray covers the bbox at stepSize = diag/200 and gets ~10
-              // samples per typical SPE-9 cell.
-              float a = 0.18;
+              // Higher per-step alpha so a small number of cells in
+              // thin layers still produce visible color. uBodyAlpha controls
+              // how 'solid' the body looks — low values let the user see
+              // through to back-face cells (good for seeing interior mesh
+              // structure); high values give an opaque blob with edges as
+              // the only cell-boundary cue.
+              float a = uBodyAlpha;
               accColor += (1.0 - accAlpha) * lit * a;
               accAlpha += (1.0 - accAlpha) * a;
             }
@@ -1006,6 +1014,17 @@
     // better against dark colormap zones (teal/blue SPE-9 cells).
     document.getElementById('c-edge').addEventListener('input', (e) => {
       uniforms.uEdgeColor.value.set(e.target.value);
+    });
+
+    // Body alpha slider — per-step alpha for cell shading. Low = see
+    // through to back faces (good for inspecting interior structure);
+    // high = solid blob with edges as the only cell-boundary cue.
+    const rBody = document.getElementById('r-body');
+    const vBody = document.getElementById('v-body');
+    rBody.addEventListener('input', () => {
+      const v = parseFloat(rBody.value);
+      uniforms.uBodyAlpha.value = v;
+      vBody.textContent = v.toFixed(2);
     });
 
     // Render loop + camera basis
