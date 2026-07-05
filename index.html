@@ -37,6 +37,7 @@
     </span></div>
     <div class="row"><span>edges</span><span>
       <button id="t-edges" class="on">on</button>
+      <button id="t-wire">wire</button>
     </span></div>
     <div class="row"><span>edge α</span><span>
       <input id="r-alpha" type="range" min="0" max="1" step="0.05" value="0.85" style="width:90px;vertical-align:middle;">
@@ -113,6 +114,35 @@
     return { positions, cellConn, scalars, nPoints, nCells };
   }
   function expect(actual, want) { if (actual !== want) throw new Error(`expected "${want}", got "${actual}"`); }
+
+    // ---------- hex cell edges for true wireframe (LineSegments) ----------
+    // Each hex has 12 edges regardless of VTK-vs-standard vertex ordering,
+    // because the connectivity is the same: bottom face 4, top face 4,
+    // vertical struts 4. We emit every cell's 12 edges as independent line
+    // segments (corner duplication is fine — lines from the same corner
+    // overlap and the renderer de-duplicates pixels).
+    function buildCellEdges(positions, cellConn, nCells) {
+      const hexEdges = [
+        [0,1], [1,2], [2,3], [3,0],  // bottom face (z=0)
+        [4,5], [5,6], [6,7], [7,4],  // top face (z=1)
+        [0,4], [1,5], [2,6], [3,7],  // vertical struts
+      ];
+      const out = new Float32Array(nCells * 12 * 2 * 3);
+      let i = 0;
+      for (let c = 0; c < nCells; c++) {
+        for (const [a, b] of hexEdges) {
+          const ia = cellConn[c*8 + a] * 3;
+          const ib = cellConn[c*8 + b] * 3;
+          out[i++] = positions[ia];
+          out[i++] = positions[ia+1];
+          out[i++] = positions[ia+2];
+          out[i++] = positions[ib];
+          out[i++] = positions[ib+1];
+          out[i++] = positions[ib+2];
+        }
+      }
+      return out;
+    }
 
   // ---------- point-in-hex (linear approximation at cell center) ----------
   // Returns (u,v,w) in [0,1] or null if outside.
@@ -819,22 +849,30 @@
           // cell-to-cell transition. This is what makes the hex mesh
           // boundaries visible — without it, adjacent cells share a smooth
           // scalar interpolation and the whole volume reads as one blob.
+          // We use 'mix' (over-blend into accColor) instead of alpha-blend
+          // accumulation: alpha-blend grows accAlpha to 1.0 after 2-3
+          // crossings and the rest of the ray reads as a solid disk — which
+          // is what user saw at body α=0. Mix keeps the line at the face
+          // (doesn't grow accAlpha) so subsequent cell shading still
+          // draws on top.
           uint prevCellIdx = OUTSIDE;
+          bool edgePaintedThisStep = false;
 
           for (int s = 0; s < 400; s++) {
             if (s >= STEPS) break;
             if (t > tEnd) break;
             if (accAlpha > 0.99) break;
+            edgePaintedThisStep = false;
             // Edge pre-pass: sub-sample inside this step to find the actual
             // cell-transition location. Without sub-sampling the line lands
             // at the step midpoint, which is up to stepSize away from the
             // real cell face — visible as a fuzzy halo at precision=1.
-            // Cost: uEdgeSamp extra texelFetch per step (alpha does the
-            // rest of the work — we still only shade at the main t).
-            if (uShowEdges == 1) {
+            // Cost: uEdgeSamp extra texelFetch per step.
+            if (uShowEdges == 1 && uEdgeSamp > 1) {
               uint subPrev = prevCellIdx;
               for (int e = 1; e < 4; e++) {
                 if (e >= uEdgeSamp) break;
+                if (edgePaintedThisStep) break;
                 float subT = t + stepSize * float(e) / float(uEdgeSamp);
                 vec3 subP = ro + rd * subT;
                 vec3 subG = clamp((subP - uBboxMin) * invBbox, 0.0, 1.0);
@@ -846,8 +884,8 @@
                   continue;
                 }
                 if (subPrev != OUTSIDE && subPrev != subIdx) {
-                  accColor += (1.0 - accAlpha) * uEdgeColor * uEdgeAlpha;
-                  accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
+                  accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
+                  edgePaintedThisStep = true;
                 }
                 subPrev = subIdx;
               }
@@ -863,12 +901,12 @@
               t += stepSize;
               continue;
             }
-            // Cell-boundary overlay at the main sample — kept for the case
-            // uEdgeSamp==1, where the sub-sample loop above is a no-op and
-            // we still want a line at every transition.
-            if (uShowEdges == 1 && uEdgeSamp == 1 && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
-              accColor += (1.0 - accAlpha) * uEdgeColor * uEdgeAlpha;
-              accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
+            // Main-sample edge paint — only if sub-sample pass didn't catch
+            // it (which is the case when uEdgeSamp == 1 and the sub-sample
+            // loop above is skipped).
+            if (uShowEdges == 1 && !edgePaintedThisStep && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
+              accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
+              edgePaintedThisStep = true;
             }
             prevCellIdx = cellIdx;
 
@@ -973,6 +1011,28 @@
     quad.frustumCulled = false;
     scene.add(quad);
 
+    // ----- True wireframe (LineSegments) -----
+    // The ray-march edge overlay is a per-sample color tint, not a line —
+    // at body α=0 with high edge α it accumulates into a solid disk instead
+    // of a wireframe. LineSegments gives actual 3D line geometry: one
+    // segment per cell edge, drawn after the quad with depthTest off so
+    // it's visible regardless of the quad's depth. Toggle via HUD.
+    const wireGeom = new THREE.BufferGeometry();
+    wireGeom.setAttribute('position', new THREE.Float32BufferAttribute(
+      buildCellEdges(mesh.positions, mesh.cellConn, mesh.nCells), 3));
+    const wireMat = new THREE.LineBasicMaterial({
+      color: 0x000000,
+      transparent: true,
+      opacity: 0.85,
+      depthTest: false,    // always on top of ray-march quad
+      depthWrite: false,
+    });
+    const wireMesh = new THREE.LineSegments(wireGeom, wireMat);
+    wireMesh.frustumCulled = false;
+    wireMesh.renderOrder = 1; // draw after the quad
+    wireMesh.visible = false;
+    scene.add(wireMesh);
+
     // Mode buttons
     document.querySelectorAll('#hud button[data-m]').forEach(b => {
       b.addEventListener('click', () => {
@@ -988,6 +1048,14 @@
       uniforms.uShowEdges.value = on ? 0 : 1;
       e.target.textContent = on ? 'off' : 'on';
       e.target.classList.toggle('on', !on);
+    });
+
+    // Wire toggle — show true geometry wireframe (LineSegments).
+    // Ray-march overlay can't draw lines, only sample tints; this is the
+    // only way to get an actual wireframe look (especially at body α=0).
+    document.getElementById('t-wire').addEventListener('click', (e) => {
+      wireMesh.visible = !wireMesh.visible;
+      e.target.classList.toggle('on', wireMesh.visible);
     });
 
     // Edge alpha slider — opacity of the boundary line (0 = invisible, 1 = full black).
