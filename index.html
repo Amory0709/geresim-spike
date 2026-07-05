@@ -35,6 +35,9 @@
       <button data-m="1" id="m1">solid</button>
       <button data-m="2" class="on" id="m2">geresim</button>
     </span></div>
+    <div class="row"><span>edges</span><span>
+      <button id="t-edges" class="on">on</button>
+    </span></div>
   </div>
   <div id="err"></div>
 
@@ -613,6 +616,7 @@
       uCamRight:  { value: new THREE.Vector3() },
       uCamUp:     { value: new THREE.Vector3() },
       uMode:      { value: 2 },
+      uShowEdges: { value: 1 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
@@ -655,6 +659,7 @@
         uniform vec3  uCamUp;
         uniform float uFovY;
         uniform int   uMode;
+        uniform int   uShowEdges; // 1 = overlay dark line at every cell boundary
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
@@ -780,6 +785,12 @@
           if (uMode == 0) { STEPS = 1; } // wire: just ray-AABB hit, draw edges via a later pass
           if (uMode == 1) { STEPS = 300; } // solid: take 300 samples, no lighting
 
+          // Track previous cell index so we can paint a dark line at every
+          // cell-to-cell transition. This is what makes the hex mesh
+          // boundaries visible — without it, adjacent cells share a smooth
+          // scalar interpolation and the whole volume reads as one blob.
+          uint prevCellIdx = OUTSIDE;
+
           for (int s = 0; s < 400; s++) {
             if (s >= STEPS) break;
             if (t > tEnd) break;
@@ -791,9 +802,21 @@
             gi = clamp(gi, ivec3(0), ivec3(uGridSize - 1));
             uint cellIdx = texelFetch(uCellIndex, gi, 0).r;
             if (cellIdx == OUTSIDE) {
+              prevCellIdx = OUTSIDE;
               t += stepSize;
               continue;
             }
+            // Cell-boundary overlay. Painted before the per-cell shading so
+            // the line is anchored to the cell face (not the later sample),
+            // and uses a high alpha so it survives even after the front
+            // cell's shading has filled in.
+            if (uShowEdges == 1 && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
+              vec3 edgeColor = vec3(0.0, 0.0, 0.0);
+              float ea = 0.85;
+              accColor += (1.0 - accAlpha) * edgeColor * ea;
+              accAlpha += (1.0 - accAlpha) * ea;
+            }
+            prevCellIdx = cellIdx;
 
             // Sample the 8 corner data for this cell. Each cell occupies
             // 8 contiguous texels in row-major order: row = cellIdx / K,
@@ -901,6 +924,14 @@
         b.classList.add('on');
         uniforms.uMode.value = parseInt(b.dataset.m);
       });
+    });
+
+    // Edges toggle — overlay dark line at every cell boundary.
+    document.getElementById('t-edges').addEventListener('click', (e) => {
+      const on = uniforms.uShowEdges.value === 1;
+      uniforms.uShowEdges.value = on ? 0 : 1;
+      e.target.textContent = on ? 'off' : 'on';
+      e.target.classList.toggle('on', !on);
     });
 
     // Render loop + camera basis
