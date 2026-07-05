@@ -769,7 +769,6 @@
           // scope initializers must be constant expressions, and length() of
           // a uniform difference is not compile-time constant.
           float bboxDiag = length(uBboxMax - uBboxMin);
-          float stepSize = max(bboxDiag / 200.0, 1e-5);
           float EPS = bboxDiag * 1e-5;
 
           // Build camera ray for this pixel (no aspect correction — we render square-ish)
@@ -796,6 +795,14 @@
           int STEPS = 600;
           if (uMode == 0) { STEPS = 1; } // wire: just ray-AABB hit, draw edges via a later pass
           if (uMode == 1) { STEPS = 300; } // solid: take 300 samples, no lighting
+          // Per-ray stepSize: every ray takes exactly STEPS samples, so the
+          // alpha-accumulation curve is identical regardless of ray angle.
+          // A fixed stepSize (bboxDiag/200) makes long bbox-path rays take
+          // many more steps than short-path rays, so the alpha-saturation
+          // shell sits at different physical depths for different rays and
+          // shows up as concentric rings that rotate with the camera.
+          float rayLen = max(tEnd - t, 1e-5);
+          float stepSize = rayLen / float(STEPS);
 
           // Track previous cell index so we can paint a dark line at every
           // cell-to-cell transition. This is what makes the hex mesh
