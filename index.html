@@ -46,6 +46,9 @@
       <input id="r-prec" type="range" min="1" max="4" step="1" value="1" style="width:90px;vertical-align:middle;">
       <span id="v-prec" style="display:inline-block;width:32px;text-align:right;">1</span>
     </span></div>
+    <div class="row"><span>edge color</span><span>
+      <input id="c-edge" type="color" value="#000000" style="width:50px;height:18px;border:1px solid rgba(160,210,255,0.3);background:transparent;cursor:pointer;padding:0;vertical-align:middle;">
+    </span></div>
   </div>
   <div id="err"></div>
 
@@ -627,6 +630,7 @@
       uShowEdges: { value: 1 },
       uEdgeAlpha: { value: 0.85 },
       uEdgeSamp:  { value: 1 },
+      uEdgeColor: { value: new THREE.Color(0, 0, 0) },
       uFovY:      { value: camera.fov * Math.PI / 180 },
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
@@ -672,6 +676,7 @@
         uniform int   uShowEdges; // 1 = overlay dark line at every cell boundary
         uniform float uEdgeAlpha; // line opacity (0 = invisible, 1 = full black)
         uniform int   uEdgeSamp;  // sub-samples per step for edge detection (1..4)
+        uniform vec3  uEdgeColor; // line RGB (alpha scaled by uEdgeAlpha)
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
@@ -835,8 +840,7 @@
                   continue;
                 }
                 if (subPrev != OUTSIDE && subPrev != subIdx) {
-                  vec3 edgeColor = vec3(0.0, 0.0, 0.0);
-                  accColor += (1.0 - accAlpha) * edgeColor * uEdgeAlpha;
+                  accColor += (1.0 - accAlpha) * uEdgeColor * uEdgeAlpha;
                   accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
                 }
                 subPrev = subIdx;
@@ -857,8 +861,7 @@
             // uEdgeSamp==1, where the sub-sample loop above is a no-op and
             // we still want a line at every transition.
             if (uShowEdges == 1 && uEdgeSamp == 1 && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
-              vec3 edgeColor = vec3(0.0, 0.0, 0.0);
-              accColor += (1.0 - accAlpha) * edgeColor * uEdgeAlpha;
+              accColor += (1.0 - accAlpha) * uEdgeColor * uEdgeAlpha;
               accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
             }
             prevCellIdx = cellIdx;
@@ -997,6 +1000,12 @@
       const v = parseInt(rPrec.value);
       uniforms.uEdgeSamp.value = v;
       vPrec.textContent = v;
+    });
+
+    // Edge color picker — line RGB. Default black; white/light tints read
+    // better against dark colormap zones (teal/blue SPE-9 cells).
+    document.getElementById('c-edge').addEventListener('input', (e) => {
+      uniforms.uEdgeColor.value.set(e.target.value);
     });
 
     // Render loop + camera basis
