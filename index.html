@@ -38,6 +38,14 @@
     <div class="row"><span>edges</span><span>
       <button id="t-edges" class="on">on</button>
     </span></div>
+    <div class="row"><span>edge α</span><span>
+      <input id="r-alpha" type="range" min="0" max="1" step="0.05" value="0.85" style="width:90px;vertical-align:middle;">
+      <span id="v-alpha" style="display:inline-block;width:32px;text-align:right;">0.85</span>
+    </span></div>
+    <div class="row"><span>edge ⌶</span><span>
+      <input id="r-prec" type="range" min="1" max="4" step="1" value="1" style="width:90px;vertical-align:middle;">
+      <span id="v-prec" style="display:inline-block;width:32px;text-align:right;">1</span>
+    </span></div>
   </div>
   <div id="err"></div>
 
@@ -617,6 +625,8 @@
       uCamUp:     { value: new THREE.Vector3() },
       uMode:      { value: 2 },
       uShowEdges: { value: 1 },
+      uEdgeAlpha: { value: 0.85 },
+      uEdgeSamp:  { value: 1 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
@@ -660,6 +670,8 @@
         uniform float uFovY;
         uniform int   uMode;
         uniform int   uShowEdges; // 1 = overlay dark line at every cell boundary
+        uniform float uEdgeAlpha; // line opacity (0 = invisible, 1 = full black)
+        uniform int   uEdgeSamp;  // sub-samples per step for edge detection (1..4)
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
@@ -795,6 +807,34 @@
             if (s >= STEPS) break;
             if (t > tEnd) break;
             if (accAlpha > 0.99) break;
+            // Edge pre-pass: sub-sample inside this step to find the actual
+            // cell-transition location. Without sub-sampling the line lands
+            // at the step midpoint, which is up to stepSize away from the
+            // real cell face — visible as a fuzzy halo at precision=1.
+            // Cost: uEdgeSamp extra texelFetch per step (alpha does the
+            // rest of the work — we still only shade at the main t).
+            if (uShowEdges == 1) {
+              uint subPrev = prevCellIdx;
+              for (int e = 1; e < 4; e++) {
+                if (e >= uEdgeSamp) break;
+                float subT = t + stepSize * float(e) / float(uEdgeSamp);
+                vec3 subP = ro + rd * subT;
+                vec3 subG = clamp((subP - uBboxMin) * invBbox, 0.0, 1.0);
+                ivec3 subGI = ivec3(floor(subG * float(uGridSize)));
+                subGI = clamp(subGI, ivec3(0), ivec3(uGridSize - 1));
+                uint subIdx = texelFetch(uCellIndex, subGI, 0).r;
+                if (subIdx == OUTSIDE) {
+                  subPrev = OUTSIDE;
+                  continue;
+                }
+                if (subPrev != OUTSIDE && subPrev != subIdx) {
+                  vec3 edgeColor = vec3(0.0, 0.0, 0.0);
+                  accColor += (1.0 - accAlpha) * edgeColor * uEdgeAlpha;
+                  accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
+                }
+                subPrev = subIdx;
+              }
+            }
             vec3 p = ro + rd * t;
             // Map p to 3D grid coords (continuous)
             vec3 g = clamp((p - uBboxMin) * invBbox, 0.0, 1.0);
@@ -806,15 +846,13 @@
               t += stepSize;
               continue;
             }
-            // Cell-boundary overlay. Painted before the per-cell shading so
-            // the line is anchored to the cell face (not the later sample),
-            // and uses a high alpha so it survives even after the front
-            // cell's shading has filled in.
-            if (uShowEdges == 1 && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
+            // Cell-boundary overlay at the main sample — kept for the case
+            // uEdgeSamp==1, where the sub-sample loop above is a no-op and
+            // we still want a line at every transition.
+            if (uShowEdges == 1 && uEdgeSamp == 1 && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
               vec3 edgeColor = vec3(0.0, 0.0, 0.0);
-              float ea = 0.85;
-              accColor += (1.0 - accAlpha) * edgeColor * ea;
-              accAlpha += (1.0 - accAlpha) * ea;
+              accColor += (1.0 - accAlpha) * edgeColor * uEdgeAlpha;
+              accAlpha += (1.0 - accAlpha) * uEdgeAlpha;
             }
             prevCellIdx = cellIdx;
 
@@ -932,6 +970,26 @@
       uniforms.uShowEdges.value = on ? 0 : 1;
       e.target.textContent = on ? 'off' : 'on';
       e.target.classList.toggle('on', !on);
+    });
+
+    // Edge alpha slider — opacity of the boundary line (0 = invisible, 1 = full black).
+    const rAlpha = document.getElementById('r-alpha');
+    const vAlpha = document.getElementById('v-alpha');
+    rAlpha.addEventListener('input', () => {
+      const v = parseFloat(rAlpha.value);
+      uniforms.uEdgeAlpha.value = v;
+      vAlpha.textContent = v.toFixed(2);
+    });
+
+    // Edge precision slider — sub-samples per main step for edge detection.
+    // 1 = line at step midpoint (fuzzy), 4 = line tightly on cell face.
+    // Higher values cost more (extra texelFetch per step).
+    const rPrec = document.getElementById('r-prec');
+    const vPrec = document.getElementById('v-prec');
+    rPrec.addEventListener('input', () => {
+      const v = parseInt(rPrec.value);
+      uniforms.uEdgeSamp.value = v;
+      vPrec.textContent = v;
     });
 
     // Render loop + camera basis
