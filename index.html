@@ -79,7 +79,7 @@
 
   <script type="module">
   import * as THREE from 'three';
-  import { ClearViewRenderer } from './src/clearview.js';
+  import { ClearViewRenderer, supportsPPLL } from './src/clearview.js';
   import { loadShaders } from './src/shader-loader.js';
 
   // ---------- error display ----------
@@ -1063,6 +1063,21 @@
         uniforms.uMode.value = m;
         // Mode 0: enable ClearView renderer (lazy-init).
         if (m === 0 && !clearviewRenderer) {
+          // Runtime gate: SwiftShader and some WebGL2 backends don't support
+          // image2D / atomic_uint. Bail out cleanly with a friendly message
+          // instead of crashing inside the shader compiler.
+          const cvGl = renderer.getContext();
+          if (!supportsPPLL(cvGl)) {
+            const msg = '此 WebGL2 后端不支持 image2D / atomic_uint (ClearView 依赖 PPLL)。请换 Chrome/Edge/Safari 用真实 GPU 打开。';
+            console.warn('[spike-b] ' + msg);
+            showErr(new Error(msg));
+            // Revert UI to current working mode.
+            currentMode = 2;
+            uniforms.uMode.value = 2;
+            document.getElementById('m2').classList.add('on');
+            document.getElementById('m0').classList.remove('on');
+            return;
+          }
           try {
             const shaders = await loadShaders();
             clearviewRenderer = new ClearViewRenderer(
