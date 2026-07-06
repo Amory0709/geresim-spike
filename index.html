@@ -31,7 +31,7 @@
     <div class="row"><span>scalar</span><span id="s-range">—</span></div>
     <div class="row"><span>fps</span><span id="s-fps">—</span></div>
     <div class="row"><span>mode</span><span>
-      <button data-m="0" id="m0">wire</button>
+      <button data-m="0" id="m0">clear</button>
       <button data-m="1" id="m1">solid</button>
       <button data-m="2" class="on" id="m2">geresim</button>
     </span></div>
@@ -54,6 +54,22 @@
       <input id="r-body" type="range" min="0" max="0.50" step="0.01" value="0.18" style="width:90px;vertical-align:middle;">
       <span id="v-body" style="display:inline-block;width:32px;text-align:right;">0.18</span>
     </span></div>
+    <div class="row"><span>sphere r</span><span>
+      <input id="r-sphere" type="range" min="20" max="2000" step="10" value="300" style="width:90px;vertical-align:middle;">
+      <span id="v-sphere" style="display:inline-block;width:32px;text-align:right;">300</span>
+    </span></div>
+    <div class="row"><span>line ⌶</span><span>
+      <input id="r-cvline" type="range" min="0.5" max="20" step="0.5" value="3.0" style="width:90px;vertical-align:middle;">
+      <span id="v-cvline" style="display:inline-block;width:32px;text-align:right;">3.0</span>
+    </span></div>
+    <div class="row"><span>focus LOD</span><span>
+      <input id="r-cvlod" type="range" min="0" max="1" step="0.05" value="0.4" style="width:90px;vertical-align:middle;">
+      <span id="v-cvlod" style="display:inline-block;width:32px;text-align:right;">0.4</span>
+    </span></div>
+    <div class="row"><span>ctx LOD</span><span>
+      <input id="r-cvclod" type="range" min="0" max="1" step="0.05" value="0.7" style="width:90px;vertical-align:middle;">
+      <span id="v-cvclod" style="display:inline-block;width:32px;text-align:right;">0.7</span>
+    </span></div>
   </div>
   <div id="err"></div>
 
@@ -63,6 +79,8 @@
 
   <script type="module">
   import * as THREE from 'three';
+  import { ClearViewRenderer } from './src/clearview.js';
+  import { loadShaders } from './src/shader-loader.js';
 
   // ---------- error display ----------
   const errEl = document.getElementById('err');
@@ -1034,11 +1052,30 @@
     scene.add(wireMesh);
 
     // Mode buttons
+    let clearviewRenderer = null;     // lazy-initialized on first mode 0 click
+    let currentMode = 2;
     document.querySelectorAll('#hud button[data-m]').forEach(b => {
-      b.addEventListener('click', () => {
+      b.addEventListener('click', async () => {
         document.querySelectorAll('#hud button[data-m]').forEach(x => x.classList.remove('on'));
         b.classList.add('on');
-        uniforms.uMode.value = parseInt(b.dataset.m);
+        const m = parseInt(b.dataset.m);
+        currentMode = m;
+        uniforms.uMode.value = m;
+        // Mode 0: enable ClearView renderer (lazy-init).
+        if (m === 0 && !clearviewRenderer) {
+          try {
+            const shaders = await loadShaders();
+            clearviewRenderer = new ClearViewRenderer(
+              renderer.getContext(), mesh, camera, renderer.domElement, shaders);
+            // Apply current slider values
+            clearviewRenderer.sphereRadius = parseFloat(document.getElementById('r-sphere').value);
+            clearviewRenderer.lineWidth = parseFloat(document.getElementById('r-cvline').value);
+            console.info('[spike-b] ClearView renderer initialized');
+          } catch (e) {
+            console.error('[spike-b] ClearView init failed:', e);
+            showErr(e);
+          }
+        }
       });
     });
 
@@ -1095,6 +1132,22 @@
       vBody.textContent = v.toFixed(2);
     });
 
+    // ClearView HUD sliders (no-op when clearviewRenderer is null)
+    const rSphere = document.getElementById('r-sphere');
+    const vSphere = document.getElementById('v-sphere');
+    rSphere.addEventListener('input', () => {
+      const v = parseFloat(rSphere.value);
+      vSphere.textContent = v.toFixed(0);
+      if (clearviewRenderer) clearviewRenderer.setSphereRadius(v);
+    });
+    const rCvLine = document.getElementById('r-cvline');
+    const vCvLine = document.getElementById('v-cvline');
+    rCvLine.addEventListener('input', () => {
+      const v = parseFloat(rCvLine.value);
+      vCvLine.textContent = v.toFixed(1);
+      if (clearviewRenderer) clearviewRenderer.setLineWidth(v);
+    });
+
     // Render loop + camera basis
     let frame = 0, lastFps = performance.now();
     let firstRenderFailed = null;
@@ -1106,7 +1159,14 @@
       uniforms.uCamFwd.value.copy(new THREE.Vector3().subVectors(center, camera.position).normalize());
       uniforms.uCamRight.value.copy(new THREE.Vector3().crossVectors(uniforms.uCamFwd.value, camera.up).normalize());
       uniforms.uCamUp.value.copy(new THREE.Vector3().crossVectors(uniforms.uCamRight.value, uniforms.uCamFwd.value).normalize());
-      renderer.render(scene, camera);
+
+      if (currentMode === 0 && clearviewRenderer) {
+        // ClearView: bypass Three.js renderer.render, draw with raw GL.
+        renderer.clear();
+        clearviewRenderer.render(renderer, scene, camera);
+      } else {
+        renderer.render(scene, camera);
+      }
 
       // One-shot pipeline-OK indicator on the first frame, useful for
       // verifying in a real browser console that draw calls are firing
