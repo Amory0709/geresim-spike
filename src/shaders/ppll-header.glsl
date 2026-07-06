@@ -17,14 +17,17 @@
 //   .a = unused
 
 // Per-pixel head pointer (one uint per pixel).
-layout(r32ui, binding = 0) uniform highp uimage2D uStartOffsetTex;
+// NOTE: WebGL2 GLSL ES 3.00 does NOT support `binding = N` on images.
+// Image binding is done via gl.bindImageTexture(unit, tex, ...) where
+// unit is an image unit index (0..MAX_IMAGE_UNITS-1).
+layout(r32ui) uniform highp uimage2D uStartOffsetTex;
 
 // Fragment node storage (one node per texel).
-layout(rgba32ui, binding = 1) uniform highp uimage2D uFragmentBufferTex;
+layout(rgba32ui) uniform highp uimage2D uFragmentBufferTex;
 
 // Global atomic counter — shared by all fragments.
-// One counter per binding point; offset=0 within this binding.
-layout(binding = 2, offset = 0) uniform atomic_uint uFragCounter;
+// Atomic counters DO support layout(binding=N, offset=0) in WebGL2.
+layout(binding = 0, offset = 0) uniform atomic_uint uFragCounter;
 
 uniform int uViewportW;
 uniform int uViewportH;

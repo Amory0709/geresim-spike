@@ -1,3 +1,4 @@
+#version 300 es
 // ST-8: PPLL resolve pass.
 //
 // Renders a fullscreen quad. For each pixel:
@@ -9,7 +10,6 @@
 // Reference: /tmp/HexVolumeRenderer/Data/Shaders/LinkedList/LinkedListResolve.glsl
 //            +LinkedListSort.glsl::blendFTB/insertionSort
 
-#version 300 es
 precision highp float;
 
 #include "ppll-header.glsl"

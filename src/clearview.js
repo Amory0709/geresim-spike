@@ -28,6 +28,35 @@ const LINKED_LIST_SIZE = FRAG_BUFFER_W * FRAG_BUFFER_H;
 
 const MAX_NUM_FRAGS_RESOLVE = 32;   // per-pixel resolve cutoff (insertion sort cap)
 
+/**
+ * Runtime detection: does this WebGL2 context support image2D + atomic_uint?
+ * SwiftShader's WebGL2 implementation does NOT support either — it returns
+ * null/undefined for MAX_IMAGE_UNITS. Real GPUs (NVIDIA/AMD/Intel/Apple) and
+ * modern SwiftShader (post-2024) all support both.
+ */
+export function supportsPPLL(gl) {
+  try {
+    // Try to compile a minimal fragment shader using layout(r32ui) uimage2D.
+    const fs = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(fs, `#version 300 es
+precision highp float;
+layout(r32ui) uniform highp uimage2D testImg;
+layout(binding=0, offset=0) uniform atomic_uint testCounter;
+out vec4 fragColor;
+void main() {
+  uint x = atomicCounterIncrement(testCounter);
+  imageAtomicExchange(testImg, ivec2(0), x);
+  fragColor = vec4(1.0);
+}`);
+    gl.compileShader(fs);
+    const ok = gl.getShaderParameter(fs, gl.COMPILE_STATUS);
+    gl.deleteShader(fs);
+    return ok;
+  } catch (e) {
+    return false;
+  }
+}
+
 export class ClearViewRenderer {
   constructor(gl, mesh, camera, canvas, shaders) {
     this.gl = gl;
@@ -192,16 +221,13 @@ void main() {
 
   _setupAtomicCounter() {
     const gl = this.gl;
-    // Atomic counter buffer: zero-filled Uint32. We bind it to binding=2
-    // (as declared in ppll-header.glsl).
+    // Atomic counter buffer: zero-filled Uint32. Bound to binding=0 as
+    // declared in ppll-header.glsl (single counter, offset=0).
     this.atomicCounterBuf = gl.createBuffer();
-    gl.bindBuffer(gl.UNIFORM_BUFFER, this.atomicCounterBuf);  // not used as UBO; bind later
-    // For WebGL2 atomic counters, we use gl.bufferData with zero data and
-    // bind as ATOMIC_COUNTER_BUFFER via gl.bindBufferBase.
     const zeroData = new Uint32Array([0]);
     gl.bindBuffer(gl.ATOMIC_COUNTER_BUFFER, this.atomicCounterBuf);
     gl.bufferData(gl.ATOMIC_COUNTER_BUFFER, zeroData, gl.DYNAMIC_COPY);
-    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 2, this.atomicCounterBuf);
+    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 0, this.atomicCounterBuf);
     gl.bindBuffer(gl.ATOMIC_COUNTER_BUFFER, null);
   }
 
@@ -318,7 +344,7 @@ void main() {
     gl.bindImageTexture(0, this.startOffsetTex, 0, false, 0, gl.READ_WRITE, gl.R32UI);
     gl.bindImageTexture(1, this.fragmentBufferTex, 0, false, 0, gl.READ_WRITE, gl.RGBA32UI);
     // Atomic counter (already bound at construction, but re-bind for safety).
-    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 2, this.atomicCounterBuf);
+    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 0, this.atomicCounterBuf);
 
     this._setUniform1i(this.clearProgram, 'uStartOffsetTex', 0);
     this._setUniform1i(this.clearProgram, 'uFragmentBufferTex', 1);
@@ -341,7 +367,7 @@ void main() {
     // Bind image2D textures.
     gl.bindImageTexture(0, this.startOffsetTex, 0, false, 0, gl.READ_WRITE, gl.R32UI);
     gl.bindImageTexture(1, this.fragmentBufferTex, 0, false, 0, gl.READ_WRITE, gl.RGBA32UI);
-    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 2, this.atomicCounterBuf);
+    gl.bindBufferBase(gl.ATOMIC_COUNTER_BUFFER, 0, this.atomicCounterBuf);
 
     // Bind data textures.
     gl.activeTexture(gl.TEXTURE0);
@@ -364,6 +390,7 @@ void main() {
     this._setUniform1i(this.gatherProgram, 'uLinkedListSize', LINKED_LIST_SIZE);
 
     this._setUniform1i(this.gatherProgram, 'uFaceCount', this.faceCount);
+    this._setUniform1i(this.gatherProgram, 'uTexWidth', this.buffers.texWidth);
 
     // Camera matrices.
     const mvp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);

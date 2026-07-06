@@ -1,3 +1,4 @@
+#version 300 es
 // ST-3+4+5+7: ClearView (Unified) fragment shader.
 //
 // Reference: /tmp/HexVolumeRenderer/Data/Shaders/ClearView/HexMeshUnified.glsl
@@ -8,7 +9,6 @@
 //
 // Pipeline: compute blended color + depth, then call gatherFragmentCustomDepth.
 
-#version 300 es
 precision highp float;
 precision highp int;
 

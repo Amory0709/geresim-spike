@@ -43,13 +43,24 @@ export async function loadShaders() {
 
   const sources = Object.fromEntries(entries);
 
-  function resolve(src) {
-    return src.replace(/^[ \t]*#include\s+"([^"]+)"[ \t]*$/gm, (m, name) => {
-      if (!(name in sources)) {
-        throw new Error(`Unknown shader include: ${name}`);
+  function resolve(src, depth = 0) {
+    if (depth > 10) throw new Error('Include depth exceeded (recursive include?)');
+    const lines = src.split('\n');
+    let changed = false;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const m = line.match(/^\s*#include\s+"([^"]+)"\s*$/);
+      if (m) {
+        const name = m[1];
+        if (!(name in sources)) {
+          throw new Error(`Unknown shader include: ${name}`);
+        }
+        // Recursively resolve nested includes.
+        lines[i] = resolve(sources[name], depth + 1);
+        changed = true;
       }
-      return sources[name];
-    });
+    }
+    return changed ? lines.join('\n') : src;
   }
 
   cache = {

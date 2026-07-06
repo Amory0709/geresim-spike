@@ -12,7 +12,19 @@
 // WebGL2 has no SSBOs, so we encode these as DataTextures. See
 // docs/project-recon.md §2.4 for the SSBO → image2D mapping.
 
+// Texture row width. WebGL2 minimum guaranteed max texture size is 2048;
+// SwiftShader and most desktop GPUs support 8192+. We use 4096 to safely fit
+// all of SPE-9's data on any driver (face: 54000*2=108000 texels → 27 rows).
+const TEX_WIDTH = 4096;
+
 const VTK_TO_STD = [0, 1, 3, 2, 4, 5, 7, 6];
+
+function texDims(linearCount) {
+  return {
+    width: TEX_WIDTH,
+    height: Math.ceil(linearCount / TEX_WIDTH),
+  };
+}
 
 // STD hex corner indices:
 //   0=c000, 1=c100, 2=c010, 3=c110, 4=c001, 5=c101, 6=c011, 7=c111
@@ -61,13 +73,18 @@ export function buildClearViewBuffers(mesh) {
   // Per-cell slot k (k = cellIdx * 8 + cornerIdxSTD) stores:
   //   pos = mesh.positions[mesh.cellConn[cellIdx*8 + VTK_TO_STD[cornerIdxSTD]] * 3 + xyz]
   //   attr = mesh.scalars[same index]
-  const verticesTex = new Float32Array(vertexCount * 4);
+  // Pad to TEX_WIDTH row stride.
+  const vertexDims = texDims(vertexCount);
+  const verticesTex = new Float32Array(vertexDims.width * vertexDims.height * 4);
   for (let c = 0; c < nCells; c++) {
     for (let k = 0; k < 8; k++) {
       const stdCorner = k;
       const vtkCorner = VTK_TO_STD[stdCorner];
       const pi = mesh.cellConn[c * 8 + vtkCorner];
-      const ti = (c * 8 + stdCorner) * 4;
+      const linear = c * 8 + stdCorner;
+      const col = linear % vertexDims.width;
+      const row = Math.floor(linear / vertexDims.width);
+      const ti = (row * vertexDims.width + col) * 4;
       verticesTex[ti]     = mesh.positions[pi * 3];
       verticesTex[ti + 1] = mesh.positions[pi * 3 + 1];
       verticesTex[ti + 2] = mesh.positions[pi * 3 + 2];
@@ -90,7 +107,8 @@ export function buildClearViewBuffers(mesh) {
   }
   const sRange = Math.max(sMax - sMin, 1e-9);
 
-  const edgesTex = new Float32Array(edgeCount * 2);
+  const edgeDims = texDims(edgeCount);
+  const edgesTex = new Float32Array(edgeDims.width * edgeDims.height * 2);
   for (let c = 0; c < nCells; c++) {
     // Per-cell average scalar (for edge LOD proxy)
     let cellScalarAvg = 0;
@@ -111,7 +129,10 @@ export function buildClearViewBuffers(mesh) {
       const pia = mesh.cellConn[c * 8 + VTK_TO_STD[a]];
       const pib = mesh.cellConn[c * 8 + VTK_TO_STD[b]];
       const edgeAttr = Math.max(mesh.scalars[pia], mesh.scalars[pib]);
-      const ti = (c * 12 + e) * 2;
+      const linear = c * 12 + e;
+      const col = linear % edgeDims.width;
+      const row = Math.floor(linear / edgeDims.width);
+      const ti = (row * edgeDims.width + col) * 2;
       edgesTex[ti]     = edgeAttr;
       edgesTex[ti + 1] = edgeLod;
     }
@@ -134,8 +155,10 @@ export function buildClearViewBuffers(mesh) {
   // (4 vertices per face, 2 triangles per face = 6 vertices per face).
   // But the face buffer is indexed by faceId only, with vertexId selecting
   // which corner.
-  const facesTex = new Uint32Array(faceCount * 2 * 4);  // 2 texels × 4 channels
-  const cellScalarTex = new Float32Array(faceCount);
+  const faceDims = texDims(faceCount * 2);   // 2 texels per face
+  const facesTex = new Uint32Array(faceDims.width * faceDims.height * 4);
+  const cellScalarDims = texDims(faceCount);
+  const cellScalarTex = new Float32Array(cellScalarDims.width * cellScalarDims.height);
 
   for (let c = 0; c < nCells; c++) {
     // Per-cell average scalar (used for fragment color)
@@ -152,49 +175,58 @@ export function buildClearViewBuffers(mesh) {
       const face = HEX_FACES[f];
 
       // Texel 0: vertex indices (4 per face)
-      const t0i = faceId * 8;
-      facesTex[t0i + 0] = c * 8 + face.corners[0];  // vertexIdx[0] = absolute index into vertex buffer
+      const t0linear = faceId * 2 + 0;
+      const t0col = t0linear % faceDims.width;
+      const t0row = Math.floor(t0linear / faceDims.width);
+      const t0i = (t0row * faceDims.width + t0col) * 4;
+      facesTex[t0i + 0] = c * 8 + face.corners[0];
       facesTex[t0i + 1] = c * 8 + face.corners[1];
       facesTex[t0i + 2] = c * 8 + face.corners[2];
       facesTex[t0i + 3] = c * 8 + face.corners[3];
 
       // Texel 1: edge indices (4 per face)
-      const t1i = faceId * 8 + 4;
+      const t1linear = faceId * 2 + 1;
+      const t1col = t1linear % faceDims.width;
+      const t1row = Math.floor(t1linear / faceDims.width);
+      const t1i = (t1row * faceDims.width + t1col) * 4;
       facesTex[t1i + 0] = c * 12 + face.edges[0];
       facesTex[t1i + 1] = c * 12 + face.edges[1];
       facesTex[t1i + 2] = c * 12 + face.edges[2];
       facesTex[t1i + 3] = c * 12 + face.edges[3];
 
       // Cell scalar for this face
-      cellScalarTex[faceId] = cellScalarAvg;
+      const csCol = faceId % cellScalarDims.width;
+      const csRow = Math.floor(faceId / cellScalarDims.width);
+      cellScalarTex[csRow * cellScalarDims.width + csCol] = cellScalarAvg;
     }
   }
 
   return {
     faces: {
       texels: facesTex,
-      width: 2,
-      height: faceCount,
+      width: faceDims.width,
+      height: faceDims.height,
     },
     vertices: {
       texels: verticesTex,
-      width: vertexCount,
-      height: 1,
+      width: vertexDims.width,
+      height: vertexDims.height,
     },
     edges: {
       texels: edgesTex,
-      width: edgeCount,
-      height: 1,
+      width: edgeDims.width,
+      height: edgeDims.height,
     },
     cellScalar: {
       texels: cellScalarTex,
-      width: faceCount,
-      height: 1,
+      width: cellScalarDims.width,
+      height: cellScalarDims.height,
     },
     faceCount,
     vertexCount,
     edgeCount,
     sMin,
     sMax,
+    texWidth: TEX_WIDTH,
   };
 }

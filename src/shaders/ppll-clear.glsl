@@ -1,3 +1,4 @@
+#version 300 es
 // ST-6: PPLL clear pass.
 //
 // Renders a fullscreen quad. For each pixel, writes 0xFFFFFFFF (= -1u,
@@ -6,7 +7,6 @@
 //
 // Reference: /tmp/HexVolumeRenderer/Data/Shaders/LinkedList/LinkedListClear.glsl
 
-#version 300 es
 precision highp float;
 
 #include "ppll-header.glsl"
