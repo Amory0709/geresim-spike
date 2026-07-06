@@ -14,6 +14,11 @@ precision highp float;
 
 #include "ppll-header.glsl"
 
+// Fragment buffer is RGBA32UI at FRAG_BUFFER_W × FRAG_BUFFER_H (see clearview.js).
+// Matches createFragmentBufferImage(gl, FRAG_BUFFER_W, FRAG_BUFFER_H) and the
+// matching fold in ppll-gather.glsl::gatherFragmentCustomDepth.
+#define FRAG_BUFFER_W 2048
+
 #define MAX_NUM_FRAGS 32
 
 // Per-pixel storage (allocated in fragment shader; 32 entries is 32 × 12 bytes
@@ -42,7 +47,10 @@ void main() {
     int numFrags = 0;
     for (int i = 0; i < MAX_NUM_FRAGS; i++) {
         if (fragOffset == 0xFFFFFFFFu) break;
-        uvec4 frag = imageLoad(uFragmentBufferTex, ivec2(int(fragOffset), 0));
+        // Reverse the gather's fold: linear offset → (offset % W, offset / W).
+        uvec4 frag = imageLoad(uFragmentBufferTex,
+                               ivec2(int(fragOffset) % FRAG_BUFFER_W,
+                                     int(fragOffset) / FRAG_BUFFER_W));
         fragOffset = frag.b;
 
         colorList[i] = frag.r;

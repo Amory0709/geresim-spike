@@ -5,6 +5,10 @@
 
 #include "ppll-header.glsl"
 
+// Fragment buffer is RGBA32UI at FRAG_BUFFER_W × FRAG_BUFFER_H (see clearview.js).
+// Matches createFragmentBufferImage(gl, FRAG_BUFFER_W, FRAG_BUFFER_H).
+#define FRAG_BUFFER_W 2048
+
 /**
  * Insert a fragment into the per-pixel linked list.
  * The fragment carries its own custom depth (typically length(fragPos - camPos)).
@@ -20,7 +24,6 @@ void gatherFragmentCustomDepth(vec4 color, float depth) {
 
     int x = int(gl_FragCoord.x);
     int y = int(gl_FragCoord.y);
-    uint pixelIndex = addrGen(ivec2(x, y));
 
     uint insertIndex = atomicCounterIncrement(uFragCounter);
 
@@ -29,25 +32,22 @@ void gatherFragmentCustomDepth(vec4 color, float depth) {
         return;
     }
 
-    // Read current head of the linked list for this pixel.
-    uint oldHead = imageLoad(uStartOffsetTex, ivec2(x, y)).r;
+    // Atomically swap the head pointer for this pixel, capturing the previous
+    // head as our `next` pointer in one atomic step. This avoids the race where
+    // two concurrent inserts would both read the same old head, then both
+    // overwrite it — orphaning the first fragment.
+    uint oldHead = imageAtomicExchange(uStartOffsetTex, ivec2(x, y), insertIndex);
 
     // Build the new fragment node.
     uvec4 frag;
     frag.r = packColor(color);                              // packed color (rgba 10/10/10/10)
     frag.g = floatBitsToUint(depth);                        // depth as uint bits
-    frag.b = oldHead;                                       // next pointer
+    frag.b = oldHead;                                       // next pointer (atomic, race-free)
     frag.a = 0u;                                            // unused
 
-    // Atomically swap the head pointer to point to our new node.
-    imageAtomicExchange(uStartOffsetTex, ivec2(x, y), insertIndex);
-
-    // Write the fragment node to the fragment buffer.
-    // Fragment buffer index is linear: insertIndex → (insertIndex % W, insertIndex / W)
-    ivec2 fragCoord = ivec2(int(insertIndex) % int(uLinkedListSize),
-                            int(insertIndex) / int(uLinkedListSize));
-    // The above is a simplification; actual fragment buffer dimensions are
-    // separate from linked list size. For now, assume fragment buffer is
-    // (uLinkedListSize, 1).
-    imageStore(uFragmentBufferTex, ivec2(int(insertIndex), 0), frag);
+    // Write the fragment node into the 2D fragment buffer. Linear insertIndex
+    // is unfolded to (insertIndex % W, insertIndex / W) so writes never go OOB.
+    ivec2 fragAddr = ivec2(int(insertIndex) % FRAG_BUFFER_W,
+                           int(insertIndex) / FRAG_BUFFER_W);
+    imageStore(uFragmentBufferTex, fragAddr, frag);
 }
