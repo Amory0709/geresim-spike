@@ -105,13 +105,8 @@ void main() {
 
     // ---- 3. Volume color (scalar-based, modulated by context opacity) ----
     // Use average of 4 face corner scalars (sampled from vVertexAttributes)
-    // for the cell color, or fetch the per-face scalar directly.
-    int faceId = int(gl_FragCoord.x) + int(gl_FragCoord.y) * 1000;  // dummy
-    // The face ID is not directly available in fragment; instead use the
-    // average of the 4 face-local vertex attributes (which already encode
-    // the per-cell average scalar via the per-corner scalar in the vertex
-    // buffer). This is a per-face average, not per-cell, but it's close
-    // enough for the wireframe overlay.
+    // as a proxy for the cell scalar — these were already populated with
+    // per-corner scalar values in the vertex buffer.
     float cellScalar = 0.25 * (vVertexAttributes[0] + vVertexAttributes[1]
                              + vVertexAttributes[2] + vVertexAttributes[3]);
     vec3 baseColor = colormap((cellScalar - uScalarMin)
