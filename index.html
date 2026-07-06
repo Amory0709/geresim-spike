@@ -685,6 +685,10 @@
       uEdgeColor: { value: new THREE.Color(0, 0, 0) },
       uBodyAlpha: { value: 0.18 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
+      // Focus sphere (ClearView fallback path; no PPLL needed).
+      uSphereCenter: { value: new THREE.Vector3(0, 0, 0) },
+      uSphereRadius: { value: 300.0 },
+      uFocusMode:    { value: 0 },
       uScalarMin: { value: 0.0 },
       uScalarMax: { value: 20.0 },
       uTexK:      { value: 16 },  // cells per row in the cellData texture
@@ -731,6 +735,10 @@
         uniform int   uEdgeSamp;  // sub-samples per step for edge detection (1..4)
         uniform vec3  uEdgeColor; // line RGB (alpha scaled by uEdgeAlpha)
         uniform float uBodyAlpha; // per-step alpha for cell shading (controls how 'solid' the body looks)
+        // Focus sphere uniforms (used when uFocusMode == 1).
+        uniform vec3  uSphereCenter;
+        uniform float uSphereRadius;
+        uniform int   uFocusMode; // 0 = no focus modulation, 1 = ClearView-style alpha modulation
         uniform float uScalarMin;
         uniform float uScalarMax;
         uniform int   uTexK;  // cells per row in cellData texture
@@ -1008,6 +1016,15 @@
               // structure); high values give an opaque blob with edges as
               // the only cell-boundary cue.
               float a = uBodyAlpha;
+              // ClearView-style focus modulation (fallback path).
+              // When uFocusMode == 1, samples near the focus center become
+              // more transparent (pow(d/r, 4) → 0 at center), so the user
+              // can "see through" the focus region. Samples outside the
+              // sphere remain at full alpha (focusT clamped to 1 → mask=1).
+              if (uFocusMode == 1) {
+                float focusT = clamp(distance(p, uSphereCenter) / max(uSphereRadius, 1e-3), 0.0, 1.0);
+                a *= pow(focusT, 4.0);
+              }
               accColor += (1.0 - accAlpha) * lit * a;
               accAlpha += (1.0 - accAlpha) * a;
             }
@@ -1052,7 +1069,8 @@
     scene.add(wireMesh);
 
     // Mode buttons
-    let clearviewRenderer = null;     // lazy-initialized on first mode 0 click
+    let clearviewRenderer = null;     // lazy-initialized on first mode 0 click (PPLL path)
+    let focusFallback = null;         // lazy-initialized on PPLL-unsupported fallback
     let currentMode = 2;
     document.querySelectorAll('#hud button[data-m]').forEach(b => {
       b.addEventListener('click', async () => {
@@ -1062,20 +1080,38 @@
         currentMode = m;
         uniforms.uMode.value = m;
         // Mode 0: enable ClearView renderer (lazy-init).
-        if (m === 0 && !clearviewRenderer) {
-          // Runtime gate: SwiftShader and some WebGL2 backends don't support
-          // image2D / atomic_uint. Bail out cleanly with a friendly message
-          // instead of crashing inside the shader compiler.
+        if (m === 0 && !clearviewRenderer && !focusFallback) {
+          // Tear down the previous clearview renderer if we left it in a
+          // bad state from a prior click.
           const cvGl = renderer.getContext();
           if (!supportsPPLL(cvGl)) {
-            const msg = '此 WebGL2 后端不支持 image2D / atomic_uint (ClearView 依赖 PPLL)。请换 Chrome/Edge/Safari 用真实 GPU 打开。';
-            console.warn('[spike-b] ' + msg);
-            showErr(new Error(msg));
-            // Revert UI to current working mode.
-            currentMode = 2;
-            uniforms.uMode.value = 2;
-            document.getElementById('m2').classList.add('on');
-            document.getElementById('m0').classList.remove('on');
+            // No-PPLL fallback: use geresim ray-march (mode 2) with focus
+            // modulation. Same ClearView alpha formula, just applied per
+            // ray-march sample instead of per face fragment.
+            console.info('[spike-b] PPLL not supported — falling back to geresim + focus sphere');
+            // Hide the error box from any earlier bails.
+            errEl.style.display = 'none';
+            uniforms.uMode.value = 2;  // geresim mode handles the rendering
+            uniforms.uFocusMode.value = 1;
+            currentMode = 0;
+            // Lazy import the focus-controls module.
+            const { attachFocusControls } = await import('./src/focus-controls.js');
+            focusFallback = attachFocusControls({
+              canvas: renderer.domElement,
+              camera,
+              uniforms,
+              mesh,
+            });
+            // Wire HUD sliders to fallback.
+            const sphereSlider = document.getElementById('r-sphere');
+            const sphereValue  = document.getElementById('v-sphere');
+            focusFallback.setSphereRadius(parseFloat(sphereSlider.value));
+            sphereSlider.oninput = (e) => {
+              const v = parseFloat(e.target.value);
+              focusFallback.setSphereRadius(v);
+              sphereValue.textContent = v.toFixed(0);
+            };
+            console.info('[spike-b] focus fallback initialized');
             return;
           }
           try {
@@ -1090,6 +1126,11 @@
             console.error('[spike-b] ClearView init failed:', e);
             showErr(e);
           }
+        }
+        // Mode change away from 0: tear down whichever renderer is active.
+        if (m !== 0 && currentMode === 0) {
+          if (focusFallback) { focusFallback.dispose(); focusFallback = null; }
+          uniforms.uFocusMode.value = 0;
         }
       });
     });
@@ -1176,9 +1217,13 @@
       uniforms.uCamUp.value.copy(new THREE.Vector3().crossVectors(uniforms.uCamRight.value, uniforms.uCamFwd.value).normalize());
 
       if (currentMode === 0 && clearviewRenderer) {
-        // ClearView: bypass Three.js renderer.render, draw with raw GL.
+        // ClearView (PPLL path): bypass Three.js renderer.render, draw with raw GL.
         renderer.clear();
         clearviewRenderer.render(renderer, scene, camera);
+      } else if (currentMode === 0 && focusFallback) {
+        // Fallback path: geresim ray-march (uMode=2) with focus modulation
+        // (uFocusMode=1). Three.js renders the ShaderMaterial normally.
+        renderer.render(scene, camera);
       } else {
         renderer.render(scene, camera);
       }
