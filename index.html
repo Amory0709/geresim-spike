@@ -36,8 +36,8 @@
       <button data-m="2" class="on" id="m2">geresim</button>
     </span></div>
     <div class="row"><span>edges</span><span>
-      <button id="t-edges" class="on">on</button>
-      <button id="t-wire">wire</button>
+      <button id="t-edges">on</button>
+      <button id="t-wire" class="on">wire</button>
     </span></div>
     <div class="row"><span>edge α</span><span>
       <input id="r-alpha" type="range" min="0" max="1" step="0.05" value="0.85" style="width:90px;vertical-align:middle;">
@@ -79,6 +79,9 @@
 
   <script type="module">
   import * as THREE from 'three';
+  import { LineSegmentsGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineSegmentsGeometry.js';
+  import { LineSegments2 }       from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineSegments2.js';
+  import { LineMaterial }        from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineMaterial.js';
   import { ClearViewRenderer, supportsPPLL } from './src/clearview.js';
   import { loadShaders } from './src/shader-loader.js';
 
@@ -1046,27 +1049,45 @@
     quad.frustumCulled = false;
     scene.add(quad);
 
-    // ----- True wireframe (LineSegments) -----
-    // The ray-march edge overlay is a per-sample color tint, not a line —
-    // at body α=0 with high edge α it accumulates into a solid disk instead
-    // of a wireframe. LineSegments gives actual 3D line geometry: one
-    // segment per cell edge, drawn after the quad with depthTest off so
-    // it's visible regardless of the quad's depth. Toggle via HUD.
-    const wireGeom = new THREE.BufferGeometry();
-    wireGeom.setAttribute('position', new THREE.Float32BufferAttribute(
-      buildCellEdges(mesh.positions, mesh.cellConn, mesh.nCells), 3));
-    const wireMat = new THREE.LineBasicMaterial({
+    // ----- True wireframe (LineSegments2 — fat lines, constant pixel width) -----
+    // The ray-march edge overlay paints a per-sample color tint at grid-texel
+    // boundaries: width is proportional to step size (= rayLen / STEPS), so
+    // lines are thicker for head-on rays and thinner for grazing rays — the
+    // "width varies with angle" artifact. LineSegments2 / LineMaterial draws
+    // each hex-cell edge as a screen-space-constant-width quad strip driven
+    // by the LineMaterial vertex shader, so the line thickness in *pixels*
+    // is independent of camera distance / angle / ray length.
+    //
+    // We feed it the actual hex-cell edge geometry (12 edges × nCells) so
+    // the lines sit on the real mesh topology, not on the 64^3 sampling
+    // grid that the ray-march shader uses. depthTest off so back-side edges
+    // stay visible (cage view), same as the previous LineSegments setup.
+    const wireGeom = new LineSegmentsGeometry();
+    wireGeom.setPositions(buildCellEdges(mesh.positions, mesh.cellConn, mesh.nCells));
+    const wireMat = new LineMaterial({
       color: 0x000000,
+      linewidth: 1.5, // pixels (constant screen-space width)
       transparent: true,
       opacity: 0.85,
-      depthTest: false,    // always on top of ray-march quad
+      depthTest: false,
       depthWrite: false,
+      worldUnits: false, // pixel mode (NOT world units — we want constant width)
+      // Resolution MUST be set for pixel-mode linewidth; updated on resize.
+      resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
     });
-    const wireMesh = new THREE.LineSegments(wireGeom, wireMat);
+    const wireMesh = new LineSegments2(wireGeom, wireMat);
     wireMesh.frustumCulled = false;
-    wireMesh.renderOrder = 1; // draw after the quad
-    wireMesh.visible = false;
+    wireMesh.renderOrder = 1; // draw after the ray-march quad
+    wireMesh.visible = true;  // ON by default — this is the natural-looking boundary viz
+    wireMesh.computeLineDistances();
     scene.add(wireMesh);
+
+    // Keep LineMaterial.resolution in sync with the canvas size, otherwise
+    // the pixel-width math drifts on window resize and lines look chunky or
+    // hairline-thin.
+    window.addEventListener('resize', () => {
+      wireMat.resolution.set(window.innerWidth, window.innerHeight);
+    });
 
     // Mode buttons
     let clearviewRenderer = null;     // lazy-initialized on first mode 0 click (PPLL path)
@@ -1143,20 +1164,23 @@
       e.target.classList.toggle('on', !on);
     });
 
-    // Wire toggle — show true geometry wireframe (LineSegments).
-    // Ray-march overlay can't draw lines, only sample tints; this is the
-    // only way to get an actual wireframe look (especially at body α=0).
+    // Wire toggle — show true geometry wireframe (LineSegments2, fat lines).
+    // Default ON because it's the natural-looking cell-boundary viz; the
+    // user can turn it off if they want to see just the shaded body.
     document.getElementById('t-wire').addEventListener('click', (e) => {
       wireMesh.visible = !wireMesh.visible;
       e.target.classList.toggle('on', wireMesh.visible);
     });
 
-    // Edge alpha slider — opacity of the boundary line (0 = invisible, 1 = full black).
+    // Edge alpha slider — drives BOTH the shader overlay (uEdgeAlpha) AND the
+    // fat-line wireframe opacity. One slider, two renderers, so the user
+    // doesn't have to think about which knob to twist.
     const rAlpha = document.getElementById('r-alpha');
     const vAlpha = document.getElementById('v-alpha');
     rAlpha.addEventListener('input', () => {
       const v = parseFloat(rAlpha.value);
       uniforms.uEdgeAlpha.value = v;
+      wireMat.opacity = v;
       vAlpha.textContent = v.toFixed(2);
     });
 
