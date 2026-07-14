@@ -36,8 +36,7 @@
       <button data-m="2" class="on" id="m2">geresim</button>
     </span></div>
     <div class="row"><span>edges</span><span>
-      <button id="t-edges">on</button>
-      <button id="t-wire" class="on">wire</button>
+      <button id="t-edges" class="on">on</button>
     </span></div>
     <div class="row"><span>edge α</span><span>
       <input id="r-alpha" type="range" min="0" max="1" step="0.05" value="0.85" style="width:90px;vertical-align:middle;">
@@ -79,9 +78,6 @@
 
   <script type="module">
   import * as THREE from 'three';
-  import { LineSegmentsGeometry } from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineSegmentsGeometry.js';
-  import { LineSegments2 }       from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineSegments2.js';
-  import { LineMaterial }        from 'https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/lines/LineMaterial.js';
   import { ClearViewRenderer, supportsPPLL } from './src/clearview.js';
   import { loadShaders } from './src/shader-loader.js';
 
@@ -135,35 +131,6 @@
     return { positions, cellConn, scalars, nPoints, nCells };
   }
   function expect(actual, want) { if (actual !== want) throw new Error(`expected "${want}", got "${actual}"`); }
-
-    // ---------- hex cell edges for true wireframe (LineSegments) ----------
-    // Each hex has 12 edges regardless of VTK-vs-standard vertex ordering,
-    // because the connectivity is the same: bottom face 4, top face 4,
-    // vertical struts 4. We emit every cell's 12 edges as independent line
-    // segments (corner duplication is fine — lines from the same corner
-    // overlap and the renderer de-duplicates pixels).
-    function buildCellEdges(positions, cellConn, nCells) {
-      const hexEdges = [
-        [0,1], [1,2], [2,3], [3,0],  // bottom face (z=0)
-        [4,5], [5,6], [6,7], [7,4],  // top face (z=1)
-        [0,4], [1,5], [2,6], [3,7],  // vertical struts
-      ];
-      const out = new Float32Array(nCells * 12 * 2 * 3);
-      let i = 0;
-      for (let c = 0; c < nCells; c++) {
-        for (const [a, b] of hexEdges) {
-          const ia = cellConn[c*8 + a] * 3;
-          const ib = cellConn[c*8 + b] * 3;
-          out[i++] = positions[ia];
-          out[i++] = positions[ia+1];
-          out[i++] = positions[ia+2];
-          out[i++] = positions[ib];
-          out[i++] = positions[ib+1];
-          out[i++] = positions[ib+2];
-        }
-      }
-      return out;
-    }
 
   // ---------- point-in-hex (linear approximation at cell center) ----------
   // Returns (u,v,w) in [0,1] or null if outside.
@@ -688,6 +655,9 @@
       uEdgeColor: { value: new THREE.Color(0, 0, 0) },
       uBodyAlpha: { value: 0.18 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
+      // Screen pixel size — used by the edge paint to make line thickness
+      // approximately constant in screen space. Updated on resize.
+      uScreenSize: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
       // Focus sphere (ClearView fallback path; no PPLL needed).
       uSphereCenter: { value: new THREE.Vector3(0, 0, 0) },
       uSphereRadius: { value: 300.0 },
@@ -738,6 +708,7 @@
         uniform int   uEdgeSamp;  // sub-samples per step for edge detection (1..4)
         uniform vec3  uEdgeColor; // line RGB (alpha scaled by uEdgeAlpha)
         uniform float uBodyAlpha; // per-step alpha for cell shading (controls how 'solid' the body looks)
+        uniform vec2  uScreenSize; // canvas pixel size (used to make edge line thickness ~constant in screen space)
         // Focus sphere uniforms (used when uFocusMode == 1).
         uniform vec3  uSphereCenter;
         uniform float uSphereRadius;
@@ -863,7 +834,7 @@
 
           // March
           int STEPS = 600;
-          if (uMode == 0) { STEPS = 1; } // wire: just ray-AABB hit, draw edges via a later pass
+          if (uMode == 0) { STEPS = 1; } // mode 0 = ClearView (separate renderer); main quad just emits a placeholder
           if (uMode == 1) { STEPS = 300; } // solid: take 300 samples, no lighting
           // Per-ray stepSize: every ray takes exactly STEPS samples, so the
           // alpha-accumulation curve is identical regardless of ray angle.
@@ -878,30 +849,47 @@
           // cell-to-cell transition. This is what makes the hex mesh
           // boundaries visible — without it, adjacent cells share a smooth
           // scalar interpolation and the whole volume reads as one blob.
-          // We use 'mix' (over-blend into accColor) instead of alpha-blend
-          // accumulation: alpha-blend grows accAlpha to 1.0 after 2-3
-          // crossings and the rest of the ray reads as a solid disk — which
-          // is what user saw at body α=0. Mix keeps the line at the face
-          // (doesn't grow accAlpha) so subsequent cell shading still
-          // draws on top.
+          //
+          // Edge paint happens AFTER body shading (mix on accColor at the
+          // tail of each step), with a screen-pixel-aware countdown so the
+          // line thickness stays roughly constant in pixels across all
+          // ray angles and depths. See comment block below.
           uint prevCellIdx = OUTSIDE;
-          bool edgePaintedThisStep = false;
+          // Edge paint uses a "countdown" model: when a cell-boundary
+          // crossing is detected, we set edgePaintCountdown to a value
+          // sized so that the upcoming paint runs span ~2 screen pixels
+          // (computed from stepSize, viewport size, depth, and FOV).
+          // Each tick of the loop paints one streak of the edge color on
+          // top of the body, fading as the countdown drains. This makes
+          // the edge line thickness approximately constant in screen
+          // pixels regardless of:
+          //   - ray angle (grazing vs head-on)
+          //   - camera distance
+          //   - world-space mesh scale
+          // which is what the previous one-shot mix() couldn't do.
+          bool boundaryHitThisStep = false;
+          int edgePaintCountdown = 0;
+          int edgePaintCountdownMax = 0;
 
           for (int s = 0; s < 400; s++) {
             if (s >= STEPS) break;
             if (t > tEnd) break;
             if (accAlpha > 0.99) break;
-            edgePaintedThisStep = false;
+            boundaryHitThisStep = false;
             // Edge pre-pass: sub-sample inside this step to find the actual
             // cell-transition location. Without sub-sampling the line lands
             // at the step midpoint, which is up to stepSize away from the
             // real cell face — visible as a fuzzy halo at precision=1.
-            // Cost: uEdgeSamp extra texelFetch per step.
+            // Cost: uEdgeSamp extra texelFetch per step. We ONLY flag the
+            // hit here (no paint) — the actual paint happens after body
+            // shading so the edge always wins over the body (the previous
+            // implementation painted before body, and body shading then
+            // accumulated on top, washing the edge out).
             if (uShowEdges == 1 && uEdgeSamp > 1) {
               uint subPrev = prevCellIdx;
               for (int e = 1; e < 4; e++) {
                 if (e >= uEdgeSamp) break;
-                if (edgePaintedThisStep) break;
+                if (boundaryHitThisStep) break;
                 float subT = t + stepSize * float(e) / float(uEdgeSamp);
                 vec3 subP = ro + rd * subT;
                 vec3 subG = clamp((subP - uBboxMin) * invBbox, 0.0, 1.0);
@@ -913,8 +901,7 @@
                   continue;
                 }
                 if (subPrev != OUTSIDE && subPrev != subIdx) {
-                  accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
-                  edgePaintedThisStep = true;
+                  boundaryHitThisStep = true;
                 }
                 subPrev = subIdx;
               }
@@ -927,17 +914,38 @@
             uint cellIdx = texelFetch(uCellIndex, gi, 0).r;
             if (cellIdx == OUTSIDE) {
               prevCellIdx = OUTSIDE;
+              // Drain any active edge-paint countdown even through empty
+              // cells so the line fades out cleanly across a hole rather
+              // than jumping from "edge" back to "body" mid-line.
+              if (uShowEdges == 1 && edgePaintCountdown > 0) {
+                float decay = float(edgePaintCountdown) / float(max(edgePaintCountdownMax, 1));
+                accColor = mix(accColor, uEdgeColor, uEdgeAlpha * decay);
+                edgePaintCountdown--;
+              }
               t += stepSize;
               continue;
             }
-            // Main-sample edge paint — only if sub-sample pass didn't catch
-            // it (which is the case when uEdgeSamp == 1 and the sub-sample
-            // loop above is skipped).
-            if (uShowEdges == 1 && !edgePaintedThisStep && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
-              accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
-              edgePaintedThisStep = true;
+            // Main-sample boundary detection — fallback when uEdgeSamp==1
+            // (the sub-sample loop above is skipped) or when the boundary
+            // lies OUTSIDE the sub-sample window (rare; happens at very
+            // steep crossing angles).
+            if (uShowEdges == 1 && !boundaryHitThisStep && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
+              boundaryHitThisStep = true;
             }
             prevCellIdx = cellIdx;
+
+            // Kick off the edge-paint countdown when a boundary was hit.
+            // Steps to paint = (target_screen_px) / (px_per_step). At
+            // depth t, one world step covers:
+            //     px_per_step ≈ stepSize * screenH / (2 * t * tan(fov/2))
+            // We aim for ~2 screen pixels of edge width — thick enough
+            // to read clearly, thin enough to stay crisp at high zoom.
+            if (boundaryHitThisStep) {
+              float pxStep = stepSize * uScreenSize.y / max(t, 0.001) / (2.0 * tan(uFovY * 0.5));
+              float idealSteps = 2.0 / max(pxStep, 0.02);
+              edgePaintCountdown = int(clamp(idealSteps + 0.5, 2.0, 30.0));
+              edgePaintCountdownMax = edgePaintCountdown;
+            }
 
             // Sample the 8 corner data for this cell. Each cell occupies
             // 8 contiguous texels in row-major order: row = cellIdx / K,
@@ -1032,6 +1040,17 @@
               accAlpha += (1.0 - accAlpha) * a;
             }
 
+            // Edge overlay — paint AFTER body shading so the line always
+            // sits on top of the body color. Alpha fades linearly from
+            // the boundary (countdown==max, full alpha) toward the tail
+            // of the streak (countdown==1, near zero) so the line is
+            // visibly tapered, not a hard rectangle.
+            if (uShowEdges == 1 && edgePaintCountdown > 0) {
+              float decay = float(edgePaintCountdown) / float(max(edgePaintCountdownMax, 1));
+              accColor = mix(accColor, uEdgeColor, uEdgeAlpha * decay);
+              edgePaintCountdown--;
+            }
+
             t += stepSize;
           }
           outColor = vec4(accColor + (1.0 - accAlpha) * vec3(0.04, 0.06, 0.09), 1.0);
@@ -1049,45 +1068,25 @@
     quad.frustumCulled = false;
     scene.add(quad);
 
-    // ----- True wireframe (LineSegments2 — fat lines, constant pixel width) -----
-    // The ray-march edge overlay paints a per-sample color tint at grid-texel
-    // boundaries: width is proportional to step size (= rayLen / STEPS), so
-    // lines are thicker for head-on rays and thinner for grazing rays — the
-    // "width varies with angle" artifact. LineSegments2 / LineMaterial draws
-    // each hex-cell edge as a screen-space-constant-width quad strip driven
-    // by the LineMaterial vertex shader, so the line thickness in *pixels*
-    // is independent of camera distance / angle / ray length.
-    //
-    // We feed it the actual hex-cell edge geometry (12 edges × nCells) so
-    // the lines sit on the real mesh topology, not on the 64^3 sampling
-    // grid that the ray-march shader uses. depthTest off so back-side edges
-    // stay visible (cage view), same as the previous LineSegments setup.
-    const wireGeom = new LineSegmentsGeometry();
-    wireGeom.setPositions(buildCellEdges(mesh.positions, mesh.cellConn, mesh.nCells));
-    const wireMat = new LineMaterial({
-      color: 0x000000,
-      linewidth: 1.5, // pixels (constant screen-space width)
-      transparent: true,
-      opacity: 0.85,
-      depthTest: false,
-      depthWrite: false,
-      worldUnits: false, // pixel mode (NOT world units — we want constant width)
-      // Resolution MUST be set for pixel-mode linewidth; updated on resize.
-      resolution: new THREE.Vector2(window.innerWidth, window.innerHeight),
-    });
-    const wireMesh = new LineSegments2(wireGeom, wireMat);
-    wireMesh.frustumCulled = false;
-    wireMesh.renderOrder = 1; // draw after the ray-march quad
-    wireMesh.visible = true;  // ON by default — this is the natural-looking boundary viz
-    wireMesh.computeLineDistances();
-    scene.add(wireMesh);
-
-    // Keep LineMaterial.resolution in sync with the canvas size, otherwise
-    // the pixel-width math drifts on window resize and lines look chunky or
-    // hairline-thin.
+    // Keep uScreenSize in sync with the canvas so edge line thickness
+    // math stays accurate on resize (else px-per-step drift changes the
+    // counted paint-streak length and edges get fatter or hairline).
     window.addEventListener('resize', () => {
-      wireMat.resolution.set(window.innerWidth, window.innerHeight);
+      uniforms.uScreenSize.value.set(window.innerWidth, window.innerHeight);
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      uniforms.uFovY.value = camera.fov * Math.PI / 180;
     });
+
+    // NOTE on previous wireframe attempt:
+    // The LineSegments2 "wire" overlay (added in 9eb015e) was rejected by
+    // the user — it drew all 12 edges × 9000 cells = 108k lines with
+    // depthTest off, producing a dense crisscross that couldn't be visually
+    // parsed as hex-cell boundaries. Removed entirely; the cell-boundary
+    // visualization now lives entirely inside the ray-march shader's edge
+    // overlay (uShowEdges), with constant screen-pixel width via a
+    // depth-aware edge-paint countdown.
 
     // Mode buttons
     let clearviewRenderer = null;     // lazy-initialized on first mode 0 click (PPLL path)
@@ -1164,23 +1163,12 @@
       e.target.classList.toggle('on', !on);
     });
 
-    // Wire toggle — show true geometry wireframe (LineSegments2, fat lines).
-    // Default ON because it's the natural-looking cell-boundary viz; the
-    // user can turn it off if they want to see just the shaded body.
-    document.getElementById('t-wire').addEventListener('click', (e) => {
-      wireMesh.visible = !wireMesh.visible;
-      e.target.classList.toggle('on', wireMesh.visible);
-    });
-
-    // Edge alpha slider — drives BOTH the shader overlay (uEdgeAlpha) AND the
-    // fat-line wireframe opacity. One slider, two renderers, so the user
-    // doesn't have to think about which knob to twist.
+    // Edge alpha slider — drives the shader overlay's line opacity.
     const rAlpha = document.getElementById('r-alpha');
     const vAlpha = document.getElementById('v-alpha');
     rAlpha.addEventListener('input', () => {
       const v = parseFloat(rAlpha.value);
       uniforms.uEdgeAlpha.value = v;
-      wireMat.opacity = v;
       vAlpha.textContent = v.toFixed(2);
     });
 
