@@ -43,8 +43,8 @@
       <span id="v-alpha" style="display:inline-block;width:32px;text-align:right;">0.85</span>
     </span></div>
     <div class="row"><span>edge ⌶</span><span>
-      <input id="r-prec" type="range" min="1" max="4" step="1" value="1" style="width:90px;vertical-align:middle;">
-      <span id="v-prec" style="display:inline-block;width:32px;text-align:right;">1</span>
+      <input id="r-prec" type="range" min="1" max="4" step="1" value="2" style="width:90px;vertical-align:middle;">
+      <span id="v-prec" style="display:inline-block;width:32px;text-align:right;">2</span>
     </span></div>
     <div class="row"><span>edge color</span><span>
       <input id="c-edge" type="color" value="#000000" style="width:50px;height:18px;border:1px solid rgba(160,210,255,0.3);background:transparent;cursor:pointer;padding:0;vertical-align:middle;">
@@ -651,7 +651,7 @@
       uMode:      { value: 2 },
       uShowEdges: { value: 1 },
       uEdgeAlpha: { value: 0.85 },
-      uEdgeSamp:  { value: 1 },
+      uEdgeSamp:  { value: 2 },
       uEdgeColor: { value: new THREE.Color(0, 0, 0) },
       uBodyAlpha: { value: 0.18 },
       uFovY:      { value: camera.fov * Math.PI / 180 },
@@ -867,9 +867,8 @@
           //   - camera distance
           //   - world-space mesh scale
           // which is what the previous one-shot mix() couldn't do.
+          // (cb31806 — replaced this with single-step paint, see below.)
           bool boundaryHitThisStep = false;
-          int edgePaintCountdown = 0;
-          int edgePaintCountdownMax = 0;
 
           for (int s = 0; s < 400; s++) {
             if (s >= STEPS) break;
@@ -914,14 +913,6 @@
             uint cellIdx = texelFetch(uCellIndex, gi, 0).r;
             if (cellIdx == OUTSIDE) {
               prevCellIdx = OUTSIDE;
-              // Drain any active edge-paint countdown even through empty
-              // cells so the line fades out cleanly across a hole rather
-              // than jumping from "edge" back to "body" mid-line.
-              if (uShowEdges == 1 && edgePaintCountdown > 0) {
-                float decay = float(edgePaintCountdown) / float(max(edgePaintCountdownMax, 1));
-                accColor = mix(accColor, uEdgeColor, uEdgeAlpha * decay);
-                edgePaintCountdown--;
-              }
               t += stepSize;
               continue;
             }
@@ -933,19 +924,6 @@
               boundaryHitThisStep = true;
             }
             prevCellIdx = cellIdx;
-
-            // Kick off the edge-paint countdown when a boundary was hit.
-            // Steps to paint = (target_screen_px) / (px_per_step). At
-            // depth t, one world step covers:
-            //     px_per_step ≈ stepSize * screenH / (2 * t * tan(fov/2))
-            // We aim for ~2 screen pixels of edge width — thick enough
-            // to read clearly, thin enough to stay crisp at high zoom.
-            if (boundaryHitThisStep) {
-              float pxStep = stepSize * uScreenSize.y / max(t, 0.001) / (2.0 * tan(uFovY * 0.5));
-              float idealSteps = 2.0 / max(pxStep, 0.02);
-              edgePaintCountdown = int(clamp(idealSteps + 0.5, 2.0, 30.0));
-              edgePaintCountdownMax = edgePaintCountdown;
-            }
 
             // Sample the 8 corner data for this cell. Each cell occupies
             // 8 contiguous texels in row-major order: row = cellIdx / K,
@@ -1040,15 +1018,24 @@
               accAlpha += (1.0 - accAlpha) * a;
             }
 
-            // Edge overlay — paint AFTER body shading so the line always
-            // sits on top of the body color. Alpha fades linearly from
-            // the boundary (countdown==max, full alpha) toward the tail
-            // of the streak (countdown==1, near zero) so the line is
-            // visibly tapered, not a hard rectangle.
-            if (uShowEdges == 1 && edgePaintCountdown > 0) {
-              float decay = float(edgePaintCountdown) / float(max(edgePaintCountdownMax, 1));
-              accColor = mix(accColor, uEdgeColor, uEdgeAlpha * decay);
-              edgePaintCountdown--;
+            // Edge overlay — single-step paint at every cell-boundary
+            // crossing. Each boundary-crossing step contributes ONE
+            // point of edge color (one march-step footprint in screen
+            // space); the visible line forms naturally from many
+            // neighboring rays whose boundary crossings align in screen
+            // space on the same cell face.
+            //
+            // The previous "countdown" streak (cb31806) painted the
+            // edge across N consecutive steps. For grazing rays this
+            // smeared across many screen pixels (the user saw thick
+            // irregular vertical bands that visibly shifted during
+            // rotation); for head-on rays it overwrote the same pixel
+            // N times and the line washed into the saturated body. One
+            // paint per crossing is rotation-stable and reads as the
+            // continuous boundary line because adjacent rays' crossings
+            // sit on the same cell face in screen space.
+            if (uShowEdges == 1 && boundaryHitThisStep) {
+              accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
             }
 
             t += stepSize;
