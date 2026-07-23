@@ -896,6 +896,11 @@
                 subGI = clamp(subGI, ivec3(0), ivec3(uGridSize - 1));
                 uint subIdx = texelFetch(uCellIndex, subGI, 0).r;
                 if (subIdx == OUTSIDE) {
+                  // Sub-sample crossing out of the volume: flag as a
+                  // boundary so the silhouette edge paints at the right
+                  // sub-step (grazing exit angles would otherwise land
+                  // at the main-sample t with a visible offset).
+                  if (subPrev != OUTSIDE) boundaryHitThisStep = true;
                   subPrev = OUTSIDE;
                   continue;
                 }
@@ -912,6 +917,13 @@
             gi = clamp(gi, ivec3(0), ivec3(uGridSize - 1));
             uint cellIdx = texelFetch(uCellIndex, gi, 0).r;
             if (cellIdx == OUTSIDE) {
+              // Exit silhouette: ray crossed from inside the volume into
+              // empty space. Paint the edge here so the outer cube/prism
+              // edges show — otherwise only internal cell-boundary
+              // gridlines draw and the bounding-box silhouette is blank.
+              if (uShowEdges == 1 && prevCellIdx != OUTSIDE) {
+                accColor = mix(accColor, uEdgeColor, uEdgeAlpha);
+              }
               prevCellIdx = OUTSIDE;
               t += stepSize;
               continue;
@@ -919,8 +931,9 @@
             // Main-sample boundary detection — fallback when uEdgeSamp==1
             // (the sub-sample loop above is skipped) or when the boundary
             // lies OUTSIDE the sub-sample window (rare; happens at very
-            // steep crossing angles).
-            if (uShowEdges == 1 && !boundaryHitThisStep && prevCellIdx != OUTSIDE && prevCellIdx != cellIdx) {
+            // steep crossing angles). Includes the OUTSIDE→cell entry
+            // transition so the front silhouette also draws.
+            if (uShowEdges == 1 && !boundaryHitThisStep && prevCellIdx != cellIdx) {
               boundaryHitThisStep = true;
             }
             prevCellIdx = cellIdx;
